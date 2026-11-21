@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>Plain video editor</title>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#1c1e22"/>
+  <!-- The trim bar's in and out indicators (a cut line, with a triangle at its
+       foot pointing at it), each tilted 45 degrees towards the other: scissors. -->
+  <g fill="none" stroke="#df386b" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+    <path transform="rotate(45 64 62)" d="M64 26V103M64 92L42 81V103Z"/>
+    <path transform="rotate(-45 64 62)" d="M64 26V103M64 92L86 81V103Z"/>
+  </g>
+</svg>

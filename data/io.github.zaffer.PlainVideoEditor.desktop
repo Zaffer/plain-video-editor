@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Plain Video Editor
+Comment=Trim, crop and join video clips, losslessly when possible
+Exec=pve-gui %F
+Icon=io.github.zaffer.PlainVideoEditor
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/quicktime;video/x-matroska;video/webm;

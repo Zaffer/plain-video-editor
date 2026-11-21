@@ -1,5 +1,7 @@
 # Plain video editor
 
+<img src="data/io.github.zaffer.PlainVideoEditor.svg" width="96" align="right" alt="Logo: the in and out indicators of the trim bar, crossed like scissors">
+
 A minimal video editor for Linux: trim, crop, join clips into a montage, lay
 sound under them, and export. When an edit is only trims and joins of matching
 clips it is exported losslessly, without re-encoding.
@@ -29,6 +31,15 @@ which needs neither GTK nor mpv.
 Files can also be added with **Add video**, or dropped on the window. A video's
 own sound appears in sound lane 1 under its clip. A sound file (or **Add
 sound**) goes into whichever lane is free at the play position.
+
+To have it in the applications menu with its logo, and under **Open With**
+for video files, install it for your user (nothing here needs root):
+
+```
+install -Dm755 -t ~/.local/bin target/release/pve-gui target/release/pve
+install -Dm644 -t ~/.local/share/applications data/io.github.zaffer.PlainVideoEditor.desktop
+install -Dm644 -t ~/.local/share/icons/hicolor/scalable/apps data/io.github.zaffer.PlainVideoEditor.svg
+```
 
 No video is kept in this repository: media files are git-ignored everywhere.
 Put clips of your own in `examples/` to follow the commands here.
@@ -142,6 +153,7 @@ crates/pve-native/    ffprobe and ffmpeg, and the pve command line
 crates/pve-gtk/       the pve-gui window
 testdata/             plan cases and their expected results
 examples/             a project to try; your own clips go here
+data/                 the logo and the desktop entry
 dev-env.sh            builds the window without the -dev packages installed
 ```
 

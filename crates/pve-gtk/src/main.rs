@@ -12,10 +12,15 @@ mod widgets;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
+/// Also the name of the desktop entry and of the icon in `data/`: the desktop
+/// finds the window's name and logo through it once those two are installed.
+const APP_ID: &str = "io.github.zaffer.PlainVideoEditor";
+
 fn main() -> glib::ExitCode {
     let files: Vec<String> = std::env::args().skip(1).collect();
     let selftest = std::env::var("PVE_SELFTEST").ok();
-    let app = gtk::Application::builder().application_id("io.github.zaffer.PlainVideoEditor").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    let app = gtk::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));
     app.connect_activate(move |app| match app::App::new(app, files.clone()) {
         Ok(editor) => {
             editor.window.present();
