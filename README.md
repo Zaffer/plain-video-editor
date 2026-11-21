@@ -4,33 +4,34 @@ A minimal video editor for Linux: trim, crop, join clips into a montage, lay
 sound under them, and export. When an edit is only trims and joins of matching
 clips it is exported losslessly, without re-encoding.
 
-There are two builds that behave the same and are held to the same test cases:
-
-- **Python** in `pve/` — the one to iterate on.
-- **Rust** in `rust/` — one small binary each for the window and the command line.
-
-Both use mpv for the preview and ffmpeg for export.
+It is written in Rust, with GTK 4 for the window, mpv for the preview and
+ffmpeg for export. There are two programs: `pve-gui`, the window, and `pve`,
+the same export from the command line.
 
 ## Requirements
 
-- `ffmpeg` and `ffprobe` on the PATH
-- GTK 4 and mpv's library: `sudo apt install libmpv2 python3-mpv`
-- Python build: Python 3.11+, PyGObject (already present on a GNOME desktop)
-- Rust build: a Rust toolchain, plus `sudo apt install libgtk-4-dev libmpv-dev`
-  (or, without installing anything, `. rust/dev-env.sh` before building)
+- To run: `ffmpeg` and `ffprobe` on the PATH, GTK 4, and mpv's library
+  (`sudo apt install ffmpeg libmpv2`).
+- To build: a Rust toolchain, and for the window
+  `sudo apt install libgtk-4-dev libmpv-dev`. Without root, `. ./dev-env.sh`
+  before building does the same job inside `target/` and installs nothing.
 
-## Run it
+## Build and run
 
 ```
-python3 -m pve gui clip1.mp4 clip2.mp4          # Python
-
-cd rust && cargo build --release --workspace     # Rust
-rust/target/release/pve-gui clip1.mp4 clip2.mp4
+cargo build --release --workspace
+target/release/pve-gui examples/clip1.mp4 examples/clip2.mp4
 ```
+
+A plain `cargo build --release` leaves the window out and builds only `pve`,
+which needs neither GTK nor mpv.
 
 Files can also be added with **Add video**, or dropped on the window. A video's
 own sound appears in sound lane 1 under its clip. A sound file (or **Add
 sound**) goes into whichever lane is free at the play position.
+
+No video is kept in this repository: media files are git-ignored everywhere.
+Put clips of your own in `examples/` to follow the commands here.
 
 ## The window
 
@@ -111,52 +112,77 @@ Closing the window never loses an edit: the session is kept and
 ## Command line
 
 ```
-pve probe clip1.mp4                          # what the planner knows about a file
-pve plan  examples/montage.json              # what an export would do, and why
-pve plan  examples/montage.json --commands   # ...and the ffmpeg commands
-pve export examples/montage.json -o out.mp4
-pve export examples/montage.json -o draft.mp4 --draft     # fast, small
+pve probe examples/clip1.mp4                 # what the planner knows about a file
+pve plan  examples/montage.pve               # what an export would do, and why
+pve plan  examples/montage.pve --commands    # ...and the ffmpeg commands
+pve export examples/montage.pve -o out.mp4
+pve export examples/montage.pve -o draft.mp4 --draft      # fast, small
 ```
 
-`pve` is `python3 -m pve` or `rust/target/release/pve`; they print the same
-thing. `--mode auto` (default) is lossless when possible, `--mode encode`
-always re-encodes with exact cuts, `--mode copy` fails rather than re-encode.
+`pve` is `target/release/pve`. `--mode auto` (default) is lossless when
+possible, `--mode encode` always re-encodes with exact cuts, `--mode copy`
+fails rather than re-encode.
+
+`examples/montage.pve` is a project written by hand: ten seconds of each of
+two clips cropped to 4:3, with the second clip's sound under the first as
+well. It looks for `clip1.mp4` (15 s or longer) and `clip2.mp4` (17 s or
+longer, with sound) beside it, and opens in the window too.
 
 In a project file, times are seconds from the start of the media (numbers, or
 exact fractions like `"1001/30000"`). Crops are in display pixels
-(`{"x","y","w","h"}`), or `{"aspect": "4:3"}` for the largest centred rectangle.
+(`{"x","y","w","h"}`), or `{"aspect": "4:3"}` for the largest centred
+rectangle. Media paths are relative to the project file.
 
 ## Layout
 
-| Part | Python | Rust |
-|---|---|---|
-| Project data, exact time | `pve/model.py` | `rust/pve-core/src/model.rs`, `time.rs` |
-| Description of a media file | `pve/media.py` | `pve-core/src/media.rs` |
-| Project → export plan (no ffmpeg syntax) | `pve/planner.py` | `pve-core/src/planner.rs` |
-| Editing operations, undo, timeline | `pve/session.py` | `pve-core/src/session.rs` |
-| ffprobe, ffmpeg | `pve/probe.py`, `pve/ffmpeg_backend.py` | `pve-native/src/` |
-| Command line | `pve/cli.py` | `pve-native/src/main.rs` |
-| Window | `pve/ui/` | `pve-gtk/src/` |
+```
+Cargo.toml            the workspace
+crates/pve-core/      the editor without a screen or a disk
+crates/pve-native/    ffprobe and ffmpeg, and the pve command line
+crates/pve-gtk/       the pve-gui window
+testdata/             plan cases and their expected results
+examples/             a project to try; your own clips go here
+dev-env.sh            builds the window without the -dev packages installed
+```
 
-The core knows nothing about ffmpeg, mpv, GTK or the filesystem, and the Rust
-core also builds for WebAssembly (`cargo check -p pve-core --target wasm32-unknown-unknown`).
+| Part | Where |
+|---|---|
+| Exact time | `pve-core/src/time.rs` |
+| Project data | `pve-core/src/model.rs` |
+| Description of a media file | `pve-core/src/media.rs` |
+| Project → export plan (no ffmpeg syntax) | `pve-core/src/planner.rs` |
+| Editing operations, undo, timeline | `pve-core/src/session.rs` |
+| Reading a file with ffprobe | `pve-native/src/probe.rs` |
+| Export plan → ffmpeg commands, and running them | `pve-native/src/ffmpeg.rs` |
+| Command line | `pve-native/src/main.rs` |
+| Window and its actions | `pve-gtk/src/app.rs` |
+| Trim bar, montage and crop drawing and input | `pve-gtk/src/widgets.rs` |
+| Their geometry and hit-testing, apart from GTK | `pve-gtk/src/geom.rs` |
+| Preview players | `pve-gtk/src/player.rs`, `mpv.rs` |
+| Scripted window test | `pve-gtk/src/selftest.rs` |
+
+`pve-core` knows nothing about ffmpeg, mpv, GTK or the filesystem, and also
+builds for WebAssembly (`cargo check -p pve-core --target wasm32-unknown-unknown`).
 
 ## Tests
 
 ```
-python3 -m unittest                                   # Python core
-cd rust && cargo test --workspace                     # Rust core, geometry, shared cases
-python3 tests/ui/drive.py /tmp/out clip1.mp4 clip2.mp4            # Python window, scripted
-PVE_SELFTEST=/tmp/out rust/target/release/pve-gui clip1.mp4 clip2.mp4   # Rust window, scripted
+cargo test                 # core and ffmpeg commands; needs no GTK, ffmpeg or media
+cargo test --workspace     # ...and the window's geometry
+PVE_SELFTEST=/tmp/out target/release/pve-gui examples/clip1.mp4 examples/clip2.mp4
 ```
 
-`tests/cases.json` holds project inputs and `tests/golden/` the expected plan
-and ffmpeg commands for each; both cores must reproduce them exactly.
-Regenerate after an intended change with `PVE_UPDATE_GOLDEN=1 python3 -m unittest`.
+`testdata/cases.json` holds projects and the settings to export them under,
+`testdata/media/` describes the two files they use, and `testdata/golden/`
+holds the expected plan and ffmpeg commands for each case. After an intended
+change, rewrite the expected files and read the diff:
+`PVE_UPDATE_GOLDEN=1 cargo test -p pve-native --test cases`.
 
-The window tests open a real window and need two clips: the first without
-sound, the second with. They drive the widgets' own press, drag and release
-code with pixel coordinates; they do not send real pointer events.
+The last command is the window test. It opens the real window and needs two
+clips: the first without sound, the second with. It drives the widgets' own
+press, drag and release code with pixel coordinates (it does not send real
+pointer events), exports, and writes `/tmp/out.pve`, `/tmp/out.mp4` and
+`/tmp/out-bars.png`.
 
 ## Known limits
 
@@ -173,3 +199,7 @@ code with pixel coordinates; they do not send real pointer events.
   both.
 - Rotated phone clips and variable-frame-rate clips are handled by design but
   have not been tested on real files.
+
+## Licence
+
+MIT; see [LICENSE](LICENSE).

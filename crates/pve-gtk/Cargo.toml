@@ -1,0 +1,20 @@
+[package]
+name = "pve-gtk"
+description = "Plain video editor: the GTK 4 window, with mpv for preview."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pve-gui"
+path = "src/main.rs"
+
+[dependencies]
+pve-core = { path = "../pve-core" }
+pve-native = { path = "../pve-native" }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
+serde_json = "1"
+pangocairo = "0.22"
+cairo-rs = { version = "0.22", features = ["png"] } # png: the self-test saves a picture of the bars

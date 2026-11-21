@@ -1,12 +1,17 @@
-# build output
-/rust/target/
-__pycache__/
-*.pyc
-*.egg-info/
+# build output (also holds the sysroot that dev-env.sh makes)
+/target/
 
-# media dropped in the repository root for testing (large)
-/*.mp4
-/*.MP4
-/*.mov
-/*.MOV
-/*.mkv
+# video and sound files, wherever they are: test clips and exports are large
+# and personal. Put your own in examples/ (see the README).
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.opus

@@ -1,0 +1,58 @@
+{
+  "commands": [
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostdin",
+      "-v",
+      "error",
+      "-y",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      "-ss",
+      "3.934333",
+      "-i",
+      "/media/clip1.mp4",
+      "-t",
+      "11.632233",
+      "-map",
+      "0:v:0",
+      "-c",
+      "copy",
+      "-map_metadata",
+      "0",
+      "-avoid_negative_ts",
+      "make_zero",
+      "-movflags",
+      "+faststart",
+      "-write_tmcd",
+      "0",
+      "/out/result.mp4"
+    ]
+  ],
+  "lists": [],
+  "plan": {
+    "audio": [],
+    "copy_audio": false,
+    "draft": false,
+    "duration": "117/10",
+    "kind": "copy",
+    "reasons": [],
+    "segments": [
+      {
+        "color": null,
+        "crop": null,
+        "end": "469/30",
+        "end_decode": "467/30",
+        "fit": null,
+        "media": "clip1",
+        "requested_end": "15",
+        "requested_start": "5",
+        "start": "59/15"
+      }
+    ],
+    "video": null,
+    "warnings": []
+  }
+}

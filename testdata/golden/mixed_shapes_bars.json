@@ -1,0 +1,142 @@
+{
+  "commands": [
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostdin",
+      "-v",
+      "error",
+      "-y",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      "-init_hw_device",
+      "vulkan",
+      "-ss",
+      "5.000000",
+      "-t",
+      "2.000000",
+      "-an",
+      "-i",
+      "/media/clip1.mp4",
+      "-ss",
+      "1.000000",
+      "-t",
+      "2.000000",
+      "-an",
+      "-i",
+      "/media/clip2.mp4",
+      "-ss",
+      "1.000000",
+      "-t",
+      "2.000000",
+      "-vn",
+      "-i",
+      "/media/clip2.mp4",
+      "-filter_complex",
+      "[0:v:0]setpts=PTS-STARTPTS,zscale=w=1080:h=810:filter=lanczos:min=170m:m=709:rin=limited:r=limited,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30/1,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[v0];[1:v:0]setpts=PTS-STARTPTS,libplacebo=w=1080:h=1920:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:format=yuv420p,fps=30/1,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[v1];[v0][v1]concat=n=2:v=1:a=0[v];[2:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.010000,afade=t=out:st=1.990000:d=0.010000,adelay=delays=96000S:all=1[a0];[a0]apad=whole_dur=4.000000,atrim=duration=4.000000[a]",
+      "-map",
+      "[v]",
+      "-map",
+      "[a]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "medium",
+      "-crf",
+      "18",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "60",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
+      "-colorspace",
+      "bt709",
+      "-color_range",
+      "tv",
+      "-fps_mode",
+      "cfr",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-ar",
+      "48000",
+      "-movflags",
+      "+faststart",
+      "-write_tmcd",
+      "0",
+      "/out/result.mp4"
+    ]
+  ],
+  "lists": [],
+  "plan": {
+    "audio": [
+      {
+        "at": "2",
+        "end": "3",
+        "gain_db": 0.0,
+        "media": "clip2",
+        "start": "1"
+      }
+    ],
+    "copy_audio": false,
+    "draft": false,
+    "duration": "4",
+    "kind": "encode",
+    "reasons": [
+      "some clips have sound and others do not",
+      "clip 2 differs from clip 1 (profile, level, width, height, pixel shape, colour, time base, encoder settings)"
+    ],
+    "segments": [
+      {
+        "color": {
+          "bit_depth": 8,
+          "full_range": false,
+          "kind": "sdr",
+          "matrix": "bt601"
+        },
+        "crop": null,
+        "end": "7",
+        "end_decode": null,
+        "fit": [
+          1080,
+          810
+        ],
+        "media": "clip1",
+        "requested_end": "7",
+        "requested_start": "5",
+        "start": "5"
+      },
+      {
+        "color": {
+          "bit_depth": 8,
+          "full_range": false,
+          "kind": "hlg",
+          "matrix": "bt2020nc"
+        },
+        "crop": null,
+        "end": "3",
+        "end_decode": null,
+        "fit": [
+          1080,
+          1920
+        ],
+        "media": "clip2",
+        "requested_end": "3",
+        "requested_start": "1",
+        "start": "1"
+      }
+    ],
+    "video": {
+      "color": "sdr",
+      "fps": "30",
+      "height": 1920,
+      "width": 1080
+    },
+    "warnings": []
+  }
+}

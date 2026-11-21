@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/pve-core", "crates/pve-native", "crates/pve-gtk"]
+# A plain `cargo build` or `cargo test` leaves the window out, so it needs no
+# GTK or mpv development packages. Add --workspace (or -p pve-gtk) for the window.
+default-members = ["crates/pve-core", "crates/pve-native"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Zaffer/plain-video-editor"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

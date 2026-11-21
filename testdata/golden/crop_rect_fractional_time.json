@@ -1,0 +1,95 @@
+{
+  "commands": [
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostdin",
+      "-v",
+      "error",
+      "-y",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      "-ss",
+      "0.033367",
+      "-t",
+      "7.466633",
+      "-an",
+      "-i",
+      "/media/clip1.mp4",
+      "-filter_complex",
+      "[0:v:0]setpts=PTS-STARTPTS,crop=332:252:100:52,zscale=w=332:h=252:filter=lanczos:min=170m:m=709:rin=limited:r=limited,fps=30/1,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[v0];[v0]null[v]",
+      "-map",
+      "[v]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "medium",
+      "-crf",
+      "18",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "60",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
+      "-colorspace",
+      "bt709",
+      "-color_range",
+      "tv",
+      "-fps_mode",
+      "cfr",
+      "-movflags",
+      "+faststart",
+      "-write_tmcd",
+      "0",
+      "/out/result.mp4"
+    ]
+  ],
+  "lists": [],
+  "plan": {
+    "audio": [],
+    "copy_audio": false,
+    "draft": false,
+    "duration": "223999/30000",
+    "kind": "encode",
+    "reasons": [
+      "clip 1 is cropped"
+    ],
+    "segments": [
+      {
+        "color": {
+          "bit_depth": 8,
+          "full_range": false,
+          "kind": "sdr",
+          "matrix": "bt601"
+        },
+        "crop": {
+          "h": 252,
+          "w": 332,
+          "x": 100,
+          "y": 52
+        },
+        "end": "15/2",
+        "end_decode": null,
+        "fit": [
+          332,
+          252
+        ],
+        "media": "clip1",
+        "requested_end": "15/2",
+        "requested_start": "1001/30000",
+        "start": "1001/30000"
+      }
+    ],
+    "video": {
+      "color": "sdr",
+      "fps": "30",
+      "height": 252,
+      "width": 332
+    },
+    "warnings": []
+  }
+}

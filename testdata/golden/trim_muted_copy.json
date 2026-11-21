@@ -1,0 +1,54 @@
+{
+  "commands": [
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostdin",
+      "-v",
+      "error",
+      "-y",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      "-i",
+      "/media/clip2.mp4",
+      "-t",
+      "19.933233",
+      "-map",
+      "0:v:0",
+      "-c",
+      "copy",
+      "-map_metadata",
+      "0",
+      "-movflags",
+      "+faststart",
+      "-write_tmcd",
+      "0",
+      "/out/result.mp4"
+    ]
+  ],
+  "lists": [],
+  "plan": {
+    "audio": [],
+    "copy_audio": false,
+    "draft": false,
+    "duration": "20",
+    "kind": "copy",
+    "reasons": [],
+    "segments": [
+      {
+        "color": null,
+        "crop": null,
+        "end": "20",
+        "end_decode": "299/15",
+        "fit": null,
+        "media": "clip2",
+        "requested_end": "17",
+        "requested_start": "7",
+        "start": "0"
+      }
+    ],
+    "video": null,
+    "warnings": []
+  }
+}

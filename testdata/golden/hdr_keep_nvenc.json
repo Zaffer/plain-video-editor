@@ -1,0 +1,130 @@
+{
+  "commands": [
+    [
+      "ffmpeg",
+      "-hide_banner",
+      "-nostdin",
+      "-v",
+      "error",
+      "-y",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      "-hwaccel",
+      "cuda",
+      "-ss",
+      "7.000000",
+      "-t",
+      "3.000000",
+      "-an",
+      "-i",
+      "/media/clip2.mp4",
+      "-ss",
+      "7.000000",
+      "-t",
+      "3.000000",
+      "-vn",
+      "-i",
+      "/media/clip2.mp4",
+      "-filter_complex",
+      "[0:v:0]setpts=PTS-STARTPTS,crop=1080:608:0:236,zscale=w=1080:h=1080:filter=lanczos,fps=30/1,format=yuv420p10le,setsar=1[v0];[v0]null[v];[1:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.010000,afade=t=out:st=2.990000:d=0.010000[a0];[a0]apad=whole_dur=3.000000,atrim=duration=3.000000[a]",
+      "-map",
+      "[v]",
+      "-map",
+      "[a]",
+      "-c:v",
+      "hevc_nvenc",
+      "-preset",
+      "p5",
+      "-tune",
+      "hq",
+      "-rc",
+      "constqp",
+      "-bf",
+      "2",
+      "-g",
+      "60",
+      "-qp",
+      "20",
+      "-profile:v",
+      "main10",
+      "-pix_fmt",
+      "p010le",
+      "-tag:v",
+      "hvc1",
+      "-color_primaries",
+      "bt2020",
+      "-color_trc",
+      "arib-std-b67",
+      "-colorspace",
+      "bt2020nc",
+      "-color_range",
+      "tv",
+      "-fps_mode",
+      "cfr",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-ar",
+      "48000",
+      "-movflags",
+      "+faststart",
+      "-write_tmcd",
+      "0",
+      "/out/result.mp4"
+    ]
+  ],
+  "lists": [],
+  "plan": {
+    "audio": [
+      {
+        "at": "0",
+        "end": "10",
+        "gain_db": 0.0,
+        "media": "clip2",
+        "start": "7"
+      }
+    ],
+    "copy_audio": false,
+    "draft": false,
+    "duration": "3",
+    "kind": "encode",
+    "reasons": [
+      "clip 1 is cropped"
+    ],
+    "segments": [
+      {
+        "color": {
+          "bit_depth": 8,
+          "full_range": false,
+          "kind": "hlg",
+          "matrix": "bt2020nc"
+        },
+        "crop": {
+          "h": 608,
+          "w": 1080,
+          "x": 0,
+          "y": 236
+        },
+        "end": "10",
+        "end_decode": null,
+        "fit": [
+          1080,
+          1080
+        ],
+        "media": "clip2",
+        "requested_end": "10",
+        "requested_start": "7",
+        "start": "7"
+      }
+    ],
+    "video": {
+      "color": "hlg",
+      "fps": "30",
+      "height": 1080,
+      "width": 1080
+    },
+    "warnings": []
+  }
+}
