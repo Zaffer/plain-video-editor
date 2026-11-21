@@ -3,7 +3,7 @@
 Each widget is told what to show with update(...) and reports gestures through
 callbacks. None of them changes the session itself.
 
-Drawing uses GTK's own snapshot calls (rectangles and text), so it needs no cairo bindings.
+Drawing uses GTK's own snapshot calls (rectangles, paths and text), so it needs no cairo bindings.
 """
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Graphene", "1.0")
-from gi.repository import Gdk, Graphene, Gtk  # noqa: E402
+gi.require_version("Gsk", "4.0")
+from gi.repository import Gdk, Graphene, Gsk, Gtk  # noqa: E402
 
 from ..model import Rect  # noqa: E402
 
@@ -40,6 +41,15 @@ def _fill(snapshot, color, x, y, w, h):
         snapshot.append_color(color, Graphene.Rect().init(x, y, w, h))
 
 
+def _triangle(snapshot, color, a, b, c):
+    path = Gsk.PathBuilder.new()
+    path.move_to(*a)
+    path.line_to(*b)
+    path.line_to(*c)
+    path.close()
+    snapshot.append_fill(path.to_path(), Gsk.FillRule.WINDING, color)
+
+
 def _outline(snapshot, color, x, y, w, h, t=1.5):
     _fill(snapshot, color, x, y, w, t)
     _fill(snapshot, color, x, y + h - t, w, t)
@@ -62,9 +72,9 @@ def _text(widget, snapshot, text, color, x, y_mid, clip=None):
 class TrimBar(Gtk.Widget):
     """The source of the thing being trimmed, in three bands.
 
-      top     the play position: a knob to drag, and clicking here moves it
+      top     the play position: a down-pointing triangle to drag, and clicking here moves it
       middle  the source, with the kept range, keyframe ticks, and the three lines
-      bottom  knobs for the in and out points
+      bottom  triangles for the in and out points, each pointing at its line from outside the kept range
 
     Clicking the middle band away from a line does nothing, so a missed grab
     never moves anything. The scroll wheel zooms around the pointer;
@@ -230,19 +240,21 @@ class TrimBar(Gtk.Widget):
             for k in visible:
                 _fill(snap, tick, round(self._x(k)), bot - 5, 1, 5)
 
-        # in and out: a line through the source and a knob below, hanging outside the kept range
+        # in and out: a line through the source, and below it a triangle pointing at the line
+        # from outside the kept range (in points right, out points left)
         fg = _fg(self)
+        ky = bot + 3
         for t, side in ((self.start, -1), (self.end, 1)):
             if v0 <= t <= v1:
                 x = self._x(t)
-                _fill(snap, fg, x - 1, top - 2, 2, bot - top + 4)
-                _fill(snap, fg, x - KNOB if side < 0 else x, bot + 2, KNOB, KNOB)
-        # play position: a line and a knob above
+                _fill(snap, fg, x - 1, top - 2, 2, ky + KNOB - top + 2)
+                _triangle(snap, fg, (x + side * KNOB, ky), (x + side * KNOB, ky + KNOB), (x, ky + KNOB / 2))
+        # play position: a line, and a triangle above pointing down at it
         if v0 <= self.pos <= v1:
             x = self._x(self.pos)
             red = _rgba(*PLAYHEAD)
-            _fill(snap, red, x - 1, top - 2, 2, bot - top + 4)
-            _fill(snap, red, x - KNOB / 2, 2, KNOB, KNOB)
+            _fill(snap, red, x - 1, 2 + KNOB / 2, 2, bot + 2 - (2 + KNOB / 2))
+            _triangle(snap, red, (x - KNOB / 2, 2), (x + KNOB / 2, 2), (x, 2 + KNOB))
         snap.pop()
         # when zoomed in: a thin strip showing which part of the source is visible
         if v1 - v0 < self.duration:
@@ -254,22 +266,31 @@ class TrimBar(Gtk.Widget):
 class Timeline(Gtk.Widget):
     """The montage: clips in order (widths in proportion to their length) and the sound lanes under them.
 
+    Sound items are addressed by (lane, index into what is shown in that lane).
+
     on_select(index, fraction)        a clip is clicked: which, and how far along it (0..1)
     on_move(src, dst, final)          a clip is dragged to a new position
     on_sound_select(lane, index)      a sound item is pressed
     on_sound_move(at, lane, final)    the selected sound item is dragged (montage seconds, lane)
+    on_scrub(t, final)                the play line is dragged (montage seconds)
+
+    The play line can be grabbed anywhere along its height. Pressing it without
+    dragging counts as a click on whatever is under it.
     """
 
     CLIP_Y, CLIP_H = 4, 30
     LANE_Y, LANE_H, LANE_GAP = 38, 18, 3
 
-    def __init__(self, lanes, on_select, on_move, on_sound_select, on_sound_move):
+    def __init__(self, lanes, on_select, on_move, on_sound_select, on_sound_move, on_scrub):
         self.n_lanes = lanes
         super().__init__(hexpand=True, height_request=self.LANE_Y + lanes * (self.LANE_H + self.LANE_GAP) + 2)
         self._on_select, self._on_move = on_select, on_move
         self._on_sound_select, self._on_sound_move = on_sound_select, on_sound_move
+        self._on_scrub = on_scrub
         self.clips: list[tuple[str, float]] = []  # (label, seconds)
-        self.sounds: list[list[tuple[str, float, float]]] = []  # per lane: (label, at, seconds)
+        # per lane: (label, at, seconds, linked); linked items are clips' own sounds, drawn joined to their clip
+        self.sounds: list[list[tuple[str, float, float, bool]]] = []
+        self.muted: list[bool] = []  # per lane: not heard in the preview
         self.selected = -1
         self.sel_sound: tuple[int, int] | None = None
         self.pos = 0.0  # montage time of the playhead
@@ -282,12 +303,12 @@ class Timeline(Gtk.Widget):
         g.connect("drag-end", self._end)
         self.add_controller(g)
         m = Gtk.EventControllerMotion()
-        m.connect("motion", lambda _c, x, y: self.set_cursor_from_name(
-            "grab" if self._drag is None and self._sound_hit(x, y) else None))
+        m.connect("motion", lambda _c, x, y: self._drag is None and self.set_cursor_from_name(self.cursor(x, y)))
         self.add_controller(m)
 
-    def update(self, clips, selected, sounds, sel_sound, pos):
+    def update(self, clips, selected, sounds, sel_sound, pos, muted=()):
         self.clips, self.selected, self.sounds, self.sel_sound, self.pos = clips, selected, sounds, sel_sound, pos
+        self.muted = list(muted)
         self.queue_draw()
 
     def set_pos(self, pos):
@@ -306,6 +327,16 @@ class Timeline(Gtk.Widget):
     def _t(self, x):
         w = self.get_width() - 2 * PAD
         return (x - PAD) / w * self.total if w > 0 else 0.0
+
+    def _line_x(self):
+        """Where the play line is drawn."""
+        return min(self._x(self.pos), self.get_width() - PAD)
+
+    def line_hit(self, x):
+        return self.total > 0 and abs(x - self._line_x()) <= GRAB
+
+    def cursor(self, x, y):
+        return "grab" if self.line_hit(x) or self._sound_hit(x, y) else None
 
     def _spans(self):
         """[(x, width)] per clip."""
@@ -332,7 +363,7 @@ class Timeline(Gtk.Widget):
         if lane is None or lane >= len(self.sounds) or self.total <= 0:
             return None
         for i in reversed(range(len(self.sounds[lane]))):
-            _, at, d = self.sounds[lane][i]
+            _, at, d, _ = self.sounds[lane][i]
             if self._x(at) <= x < max(self._x(at + d), self._x(at) + 4):
                 return lane, i
         return None
@@ -341,6 +372,10 @@ class Timeline(Gtk.Widget):
 
     def _begin(self, _g, x, y):
         self._x0, self._y0, self._moved = x, y, False
+        if self.line_hit(x):
+            self._drag = ("play", self._line_x() - x)  # keep the line where it was grabbed, not under the pointer
+            self.set_cursor_from_name("grabbing")
+            return
         hit = self._sound_hit(x, y)
         if hit:
             lane, i = hit
@@ -351,8 +386,19 @@ class Timeline(Gtk.Widget):
         hit = self._clip_hit(x, y)
         self._drag = ("clip", hit[0]) if hit else None
 
+    def _scrub(self, dx, final):
+        t = self._t(self._x0 + dx + self._drag[1])
+        self._on_scrub(min(max(t, 0.0), self.total), final)
+
     def _update(self, _g, dx, dy):
-        if self._drag is None or (abs(dx) < 6 and abs(dy) < 6 and not self._moved):
+        if self._drag is None:
+            return
+        if self._drag[0] == "play":
+            if abs(dx) >= 2 or self._moved:
+                self._moved = True
+                self._scrub(dx, False)
+            return
+        if abs(dx) < 6 and abs(dy) < 6 and not self._moved:
             return
         x, y = self._x0 + dx, self._y0 + dy
         if self._drag[0] == "sound":
@@ -369,16 +415,20 @@ class Timeline(Gtk.Widget):
             return
         kind = self._drag[0]
         if self._moved:
-            if kind == "sound":
+            if kind == "play":
+                self._scrub(dx, True)
+            elif kind == "sound":
                 self._on_sound_move(None, None, True)
             else:
                 self._on_move(self._drag[1], self._drag[1], True)
-        elif kind == "clip":
+        elif kind == "play" and self._sound_hit(self._x0, self._y0):
+            self._on_sound_select(*self._sound_hit(self._x0, self._y0))
+        elif kind in ("clip", "play"):
             hit = self._clip_hit(self._x0, self._y0)
             if hit:
                 self._on_select(*hit)
         self._drag = None
-        self.set_cursor_from_name(None)
+        self.set_cursor_from_name(self.cursor(self._x0 + dx, self._y0 + dy))
 
     # ------------------------------------------------------------ drawing
 
@@ -397,17 +447,22 @@ class Timeline(Gtk.Widget):
             items = self.sounds[lane] if lane < len(self.sounds) else []
             if not items and lane == 0 and not any(self.sounds):
                 _text(self, snap, "sound: press Add sound, or drop a sound file", _fg(self, 0.4), PAD + 8, y + self.LANE_H / 2)
-            snap.push_clip(Graphene.Rect().init(PAD, y, w - 2 * PAD, self.LANE_H))
-            for i, (label, at, d) in enumerate(items):
+            quiet = lane < len(self.muted) and self.muted[lane]
+            top = self.CLIP_Y + self.CLIP_H if lane == 0 else y  # lane 1 reaches up to the clips
+            snap.push_clip(Graphene.Rect().init(PAD, top, w - 2 * PAD, y + self.LANE_H - top))
+            for i, (label, at, d, linked) in enumerate(items):
                 sel = self.sel_sound == (lane, i)
                 box = (self._x(at), y, max(self._x(at + d) - self._x(at), 4), self.LANE_H)
-                _fill(snap, _rgba(*SOUND, 0.95 if sel else 0.5), *box)
+                color = _rgba(*SOUND, (0.95 if sel else 0.5) * (0.35 if quiet else 1))
+                _fill(snap, color, *box)
+                if linked:  # joined to the clip above it
+                    _fill(snap, color, box[0] + 1, top, box[2] - 2, y - top)
                 if sel:
                     _outline(snap, _rgba(1, 1, 1, 0.9), *box, t=1)
-                _text(self, snap, label, _rgba(1, 1, 1), box[0] + 6, y + self.LANE_H / 2, clip=box)
+                _text(self, snap, label, _rgba(1, 1, 1, 0.45 if quiet else 1), box[0] + 6, y + self.LANE_H / 2, clip=box)
             snap.pop()
         if self.total > 0:
-            _fill(snap, _rgba(*PLAYHEAD), min(self._x(self.pos), w - PAD) - 1, 0, 2, h)
+            _fill(snap, _rgba(*PLAYHEAD), self._line_x() - 1, 0, 2, h)
 
 
 class CropOverlay(Gtk.Widget):

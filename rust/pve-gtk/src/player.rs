@@ -243,6 +243,11 @@ impl Player {
     }
 
     /// (frames drawn so far, centre pixel of the last one if a test asked for sampling)
+    /// For tests: whether mpv was last told to play sound (None before it was told anything).
+    pub fn sound_on(&self) -> Option<bool> {
+        self.inner.borrow().sound.map(|s| s.0)
+    }
+
     pub fn drawn(&self) -> (u64, Option<[u8; 4]>) {
         let inner = self.inner.borrow();
         (inner.drawn, inner.sample)

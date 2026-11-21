@@ -14,7 +14,7 @@ use gtk::{gdk, gio, glib, pango};
 use pve_core::media::MediaInfo;
 use pve_core::model::{Crop, Project, Rect};
 use pve_core::planner::{ExportPlan, Infos, Kind};
-use pve_core::session::{Session, Shape, Target, LANES, MIN_GAIN_DB};
+use pve_core::session::{Session, Shape, SoundRef, Target, LANES, MIN_GAIN_DB};
 use pve_core::time::{self, r, to_f64, R};
 use pve_native::ffmpeg::{self, Capabilities, Encoder, ExportError};
 use pve_native::probe::probe;
@@ -154,12 +154,14 @@ pub struct App {
     pub out_entry: gtk::Entry,
     pub len_lbl: gtk::Label,
     total_lbl: gtk::Label,
-    pub sound: gtk::ToggleButton,
+    /// Per lane: pressed = heard in the preview.
+    pub hear: Vec<gtk::ToggleButton>,
+    hear_box: gtk::Box,
     pub volume: gtk::Scale,
     pub volume_lbl: gtk::Label,
     pub shape_btns: Vec<(Shape, gtk::ToggleButton)>,
     shapes_box: gtk::Box,
-    lock: gtk::CheckButton,
+    pub lock: gtk::CheckButton,
     pub status: gtk::Label,
     pub progress: gtk::ProgressBar,
     cancel_btn: gtk::Button,
@@ -232,10 +234,22 @@ impl App {
         let len_lbl = dim_label(4);
         bar.append(&len_lbl);
         bar.append(&gtk::Box::builder().hexpand(true).build());
-        let sound = gtk::ToggleButton::builder().label("Sound").tooltip_text("Keep this clip's own sound").build();
-        bar.append(&sound);
+        bar.append(&gtk::Label::new(Some("Sound")));
+        let hear_box = gtk::Box::builder().css_classes(["linked"]).build();
+        let hear: Vec<gtk::ToggleButton> = (1..=LANES)
+            .map(|n| {
+                let b = gtk::ToggleButton::builder()
+                    .label(n.to_string())
+                    .active(true)
+                    .tooltip_text(format!("Hear sound lane {n} in the preview. This does not change the export."))
+                    .build();
+                hear_box.append(&b);
+                b
+            })
+            .collect();
+        bar.append(&hear_box);
         let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 200.0, 1.0);
-        volume.set_size_request(110, -1);
+        volume.set_size_request(80, -1);
         volume.set_draw_value(false);
         volume.add_mark(100.0, gtk::PositionType::Bottom, None);
         volume.set_tooltip_text(Some("Volume of the selected clip or sound"));
@@ -290,7 +304,8 @@ impl App {
             out_entry,
             len_lbl,
             total_lbl,
-            sound,
+            hear,
+            hear_box,
             volume,
             volume_lbl,
             shape_btns,
@@ -384,12 +399,15 @@ impl App {
                 }
             });
         }
-        let weak = Rc::downgrade(self);
-        self.sound.connect_toggled(move |b| {
-            if let Some(a) = weak.upgrade() {
-                a.sound_toggled(b.is_active());
-            }
-        });
+        for b in &self.hear {
+            let weak = Rc::downgrade(self);
+            b.connect_toggled(move |_| {
+                if let Some(a) = weak.upgrade() {
+                    a.refresh();
+                    a.sync_lanes();
+                }
+            });
+        }
         let weak = Rc::downgrade(self);
         self.volume.connect_value_changed(move |s| {
             if let Some(a) = weak.upgrade() {
@@ -458,6 +476,12 @@ impl App {
         *self.timeline.on_sound_move.borrow_mut() = Some(Box::new(move |(at, lane, last)| {
             if let Some(a) = weak.upgrade() {
                 a.on_sound_move(at, lane, last);
+            }
+        }));
+        let weak = Rc::downgrade(self);
+        *self.timeline.on_scrub.borrow_mut() = Some(Box::new(move |(t, last)| {
+            if let Some(a) = weak.upgrade() {
+                a.on_montage_scrub(t, last);
             }
         }));
 
@@ -589,16 +613,16 @@ impl App {
         };
         st.plan = plan;
         let target = st.s.target();
-        let clip_mode = !matches!(target, Some(Target::Sound(..)));
+        let clip_mode = matches!(target, Some(Target::Clip(_)) | None);
         let has_clip = st.s.clip().is_some() && clip_mode;
 
         self.empty.set_visible(target.is_none());
         for w in [self.play_btn.upcast_ref::<gtk::Widget>(), self.trim.area.upcast_ref(), self.timeline.area.upcast_ref(),
-                  self.volume.upcast_ref(), self.pos_entry.upcast_ref(), self.in_entry.upcast_ref(), self.out_entry.upcast_ref()] {
+                  self.volume.upcast_ref(), self.hear_box.upcast_ref(), self.pos_entry.upcast_ref(), self.in_entry.upcast_ref(),
+                  self.out_entry.upcast_ref()] {
             w.set_sensitive(target.is_some());
         }
-        for w in [self.sound.upcast_ref::<gtk::Widget>(), self.shapes_box.upcast_ref(), self.lock.upcast_ref(),
-                  self.exact.upcast_ref(), self.add_sound_btn.upcast_ref()] {
+        for w in [self.shapes_box.upcast_ref::<gtk::Widget>(), self.lock.upcast_ref(), self.exact.upcast_ref(), self.add_sound_btn.upcast_ref()] {
             w.set_sensitive(has_clip);
         }
         self.export_btn.set_sensitive(st.plan.is_some() && st.cancel.is_none());
@@ -657,24 +681,30 @@ impl App {
                 if let Some((_, b)) = self.shape_btns.iter().find(|(v, _)| *v == shape).or(self.shape_btns.last()) {
                     b.set_active(true);
                 }
-                let has_sound = st.s.info(i).audio.is_some();
-                self.sound.set_sensitive(has_sound);
-                self.sound.set_active(c.audio && has_sound);
-                self.player.set_sound(c.audio && has_sound, c.gain_db);
+                self.player.set_sound(st.s.own_sound(i).is_some() && self.hears(0), c.gain_db);
             }
             _ => {
                 self.crop.update((0.0, 0.0), None, None);
-                if let Some(sound) = st.s.sound() {
-                    self.player.set_sound(true, sound.gain_db);
+                if let (Some(sound), Some(lane)) = (st.s.sound(), st.s.sound_lane()) {
+                    self.player.set_sound(self.hears(lane), sound.gain_db);
                 }
             }
         }
 
         let clips = st.s.clips().iter().enumerate().map(|(i, c)| (stem(st.s.path(i)), to_f64(&c.duration()))).collect();
-        let sounds = st.s.lanes().iter().map(|lane| {
-            lane.items.iter().map(|it| SoundBox { label: stem(&st.s.project.media[&it.media]), at: to_f64(&it.at), seconds: to_f64(&it.duration()) }).collect()
+        let shown: Vec<_> = (0..LANES).map(|n| st.s.lane_items(n)).collect();
+        let selected_sound = st.s.sound_ref().and_then(|sel| {
+            shown.iter().enumerate().find_map(|(n, lane)| Some((n, lane.iter().position(|(r, _, _)| *r == sel)?)))
+        });
+        let sounds = shown.iter().map(|lane| {
+            lane.iter().map(|(_, it, linked)| SoundBox {
+                label: stem(&st.s.project.media[&it.media]),
+                at: to_f64(&it.at),
+                seconds: to_f64(&it.duration()),
+                linked: *linked,
+            }).collect()
         }).collect();
-        self.timeline.update(clips, st.s.selected, sounds, st.s.sel_audio, montage);
+        self.timeline.update(clips, st.s.selected, sounds, selected_sound, montage, (0..LANES).map(|n| !self.hears(n)).collect());
 
         let name = st.s.file.as_deref().map(stem);
         self.window.set_title(Some(&match name {
@@ -723,13 +753,18 @@ impl App {
         }
     }
 
+    /// Whether a sound lane is heard in the preview. The export always has every lane.
+    pub fn hears(&self, lane: usize) -> bool {
+        self.hear.get(lane).is_none_or(|b| b.is_active())
+    }
+
     /// Keep the sound lanes playing in step with the montage.
     fn sync_lanes(&self) {
         let st = self.st.borrow();
         let active = st.s.clip().is_some() && st.s.sound().is_none() && self.player.playing() && !st.detached;
         let at = if active { Some(st.s.montage_time(&floor_us(st.pos))) } else { None };
         for (n, lane_player) in self.lane_players.borrow_mut().iter_mut().enumerate() {
-            let hit = at.as_ref().and_then(|at| st.s.sound_at(n, at));
+            let hit = at.as_ref().filter(|_| self.hears(n)).and_then(|at| st.s.sound_at(n, at));
             match hit {
                 Some((item, source_time)) => {
                     lane_player.sync(Some((&st.s.project.media[&item.media], to_f64(&source_time), st.s.lanes()[n].gain_db + item.gain_db)))
@@ -792,7 +827,7 @@ impl App {
             if st.s.sound().is_none() {
                 return;
             }
-            st.s.sel_audio = None;
+            st.s.clear_sound();
             st.pos = st.clip_pos;
         }
         self.show_target();
@@ -883,6 +918,22 @@ impl App {
         self.seek(t, last); // keyframes while dragging, the exact frame on release
     }
 
+    /// The play line on the montage is dragged: move through the clips.
+    fn on_montage_scrub(&self, t: f64, last: bool) {
+        let (i, source, change) = {
+            let mut st = self.st.borrow_mut();
+            let Some((i, source)) = st.s.locate(&floor_us(t)) else { return };
+            st.dragging = !last;
+            (i, to_f64(&source), st.s.sound().is_some() || st.s.selected != Some(i))
+        };
+        self.player.set_playing(false);
+        if change {
+            self.select(i, Some(source), false);
+        } else {
+            self.seek(source, last);
+        }
+    }
+
     /// The frame to show for a cut point: the first frame kept, or the last frame kept.
     fn cut_frame(&self, which: TrimHit) -> f64 {
         let st = self.st.borrow();
@@ -966,7 +1017,7 @@ impl App {
         self.begin_gesture();
         {
             let mut st = self.st.borrow_mut();
-            st.s.sel_audio = None;
+            st.s.clear_sound();
             st.s.move_clip(src, dst);
         }
         self.refresh();
@@ -975,13 +1026,17 @@ impl App {
     fn on_sound_press(&self, lane: usize, i: usize) {
         {
             let mut st = self.st.borrow_mut();
-            if st.s.sel_audio == Some((lane, i)) {
+            let Some(sound) = st.s.lane_items(lane).get(i).map(|item| item.0) else { return };
+            if st.s.sound_ref() == Some(sound) {
                 return;
             }
-            if st.s.sound().is_none() {
-                st.clip_pos = st.pos;
+            match sound {
+                // another clip's own sound: Escape goes back to that clip
+                SoundRef::Own(clip) if st.s.selected != Some(clip) => st.clip_pos = to_f64(&st.s.clips()[clip].start),
+                _ if st.s.sound().is_none() => st.clip_pos = st.pos,
+                _ => {}
             }
-            st.s.select_sound(lane, i);
+            st.s.select_sound(sound);
             st.pos = st.s.sound().map_or(0.0, |s| to_f64(&s.start));
         }
         self.load(false);
@@ -1003,21 +1058,6 @@ impl App {
             return;
         }
         self.st.borrow_mut().s.set_shape(shape);
-        self.refresh();
-    }
-
-    fn sound_toggled(&self, on: bool) {
-        if self.syncing.get() {
-            return;
-        }
-        {
-            let mut st = self.st.borrow_mut();
-            if st.s.clip().is_none() {
-                return;
-            }
-            st.s.checkpoint();
-            st.s.set_sound_on(on);
-        }
         self.refresh();
     }
 

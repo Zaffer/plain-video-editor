@@ -5,6 +5,11 @@ ported with the rest of the core. The GUI calls these operations and redraws.
 
 Either a video clip or a sound item is "the target": the thing the trim bar,
 the timestamps and the volume act on.
+
+Every sound is shown in a lane. A clip's own sound sits in lane 1 as a linked
+item: it is not stored as an item but follows the clip (trim, split, reorder)
+and stays part of a lossless copy. Moving or trimming it by itself turns it
+into an ordinary item, which no longer follows the clip.
 """
 from __future__ import annotations
 
@@ -21,7 +26,8 @@ from .planner import ExportPlan, plan
 MIN_CROP = 16  # display pixels
 MIN_SOUND = Fraction(1, 20)  # shortest sound item, seconds
 UNDO_LIMIT = 200
-LANES = 2  # sound lanes besides the clips' own sound
+LANES = 2  # sound lanes; the clips' own sound shows in the first
+OWN = "own"  # a sound reference is (OWN, clip index) or (lane, item index)
 MIN_GAIN_DB, MAX_GAIN_DB = -60.0, 12.0
 
 
@@ -39,6 +45,7 @@ class Session:
         self.infos: dict[str, MediaInfo] = {}
         self.selected = -1  # selected clip
         self.sel_audio: tuple[int, int] | None = None  # (lane, item) when a sound item is the target
+        self.sel_own = False  # the selected clip's own sound is the target
         self.exact = False  # force exact cuts (always re-encode)
         self.lock_shape = True  # a crop shape applies to every clip
         self.file: str | None = None  # project file, once saved or opened
@@ -62,11 +69,48 @@ class Session:
 
     @property
     def sound(self) -> AudioItem | None:
-        """The selected sound item, if a sound item is the target."""
+        """The selected sound item, if a sound item is the target.
+
+        For a clip's own sound this is a copy made from the clip: read it, but
+        change it only through the methods below.
+        """
+        if self.sel_own:
+            return self.own_sound(self.selected)
         if self.sel_audio is None:
             return None
         lane, i = self.sel_audio
         return self.lanes[lane].items[i]
+
+    def own_sound(self, i: int) -> AudioItem | None:
+        """Clip i's own sound as it sits in lane 1, or None if the clip has none (or it was removed)."""
+        if not (0 <= i < len(self.clips)):
+            return None
+        c = self.clips[i]
+        if not c.audio or self.infos[c.media].audio is None:
+            return None
+        return AudioItem(media=c.media, start=c.start, end=c.end, at=self.offsets()[i], gain_db=c.gain_db)
+
+    def lane_items(self, lane: int) -> list[tuple[tuple, AudioItem, bool]]:
+        """Everything shown in a lane, as (reference, item, linked): for lane 1 the clips' own sounds, then its items."""
+        out = []
+        if lane == 0:
+            out += [((OWN, i), it, True) for i in range(len(self.clips)) if (it := self.own_sound(i)) is not None]
+        if lane < len(self.lanes):
+            out += [((lane, i), it, False) for i, it in enumerate(self.lanes[lane].items)]
+        return out
+
+    @property
+    def sound_ref(self) -> tuple | None:
+        """Which sound is the target: (OWN, clip index), (lane, item index), or None."""
+        if self.sel_own:
+            return (OWN, self.selected) if self.sound is not None else None
+        return self.sel_audio
+
+    @property
+    def sound_lane(self) -> int | None:
+        """The lane the selected sound is shown in."""
+        ref = self.sound_ref
+        return None if ref is None else 0 if ref[0] == OWN else ref[0]
 
     @property
     def target(self) -> Clip | AudioItem | None:
@@ -94,15 +138,23 @@ class Session:
         return float(w), float(h)
 
     def select(self, i: int) -> None:
-        self.selected, self.sel_audio = i, None
+        self.selected, self.sel_audio, self.sel_own = i, None, False
 
-    def select_sound(self, lane: int, i: int) -> None:
-        self.sel_audio = (lane, i)
+    def select_sound(self, ref: tuple) -> None:
+        """Make a sound the target: ref is (OWN, clip index) or (lane, item index)."""
+        if ref[0] == OWN:
+            self.selected, self.sel_audio, self.sel_own = ref[1], None, True
+        else:
+            self.sel_audio, self.sel_own = ref, False
+
+    def clear_sound(self) -> None:
+        """Back to the selected clip as the target."""
+        self.sel_audio, self.sel_own = None, False
 
     # ------------------------------------------------------------ undo
 
     def _snapshot(self) -> tuple:
-        return copy.deepcopy(self.clips), copy.deepcopy(self.lanes), self.selected, self.sel_audio
+        return copy.deepcopy(self.clips), copy.deepcopy(self.lanes), self.selected, self.sel_audio, self.sel_own
 
     def checkpoint(self) -> None:
         """Call before a change (once per gesture) so it can be undone."""
@@ -114,7 +166,7 @@ class Session:
         if not src:
             return False
         dst.append(self._snapshot())
-        self.project.clips, self.project.lanes, self.selected, self.sel_audio = src.pop()
+        self.project.clips, self.project.lanes, self.selected, self.sel_audio, self.sel_own = src.pop()
         return True
 
     def undo(self) -> bool:
@@ -167,7 +219,7 @@ class Session:
         self.checkpoint()
         del self.clips[i]
         self.selected = min(self.selected if self.selected < i else max(self.selected - 1, 0), len(self.clips) - 1)
-        self.sel_audio = None
+        self.clear_sound()
 
     def move(self, i: int, j: int) -> None:
         """Move clip i to position j. The caller checkpoints once per drag."""
@@ -178,12 +230,27 @@ class Session:
 
     # ------------------------------------------------------------ trimming (clip or sound item)
 
+    def _unlink(self) -> None:
+        """Turn the selected clip's own sound into an ordinary item in lane 1. It no longer follows the clip."""
+        item, c = self.own_sound(self.selected), self.clip
+        c.audio, c.gain_db = False, 0.0
+        while len(self.lanes) < LANES:
+            self.lanes.append(AudioLane())
+        self.lanes[0].items.append(item)
+        self.sel_audio, self.sel_own = (0, len(self.lanes[0].items) - 1), False
+
+    def _editable(self) -> Clip | AudioItem:
+        """The target, as something that can be changed in place."""
+        if self.sel_own:
+            self._unlink()
+        return self.target
+
     def set_in(self, t: Fraction) -> None:
-        c = self.target
+        c = self._editable()
         c.start = max(Fraction(0), min(t, c.end - self.frame()))
 
     def set_out(self, t: Fraction) -> None:
-        c = self.target
+        c = self._editable()
         c.end = min(self.target_info().duration, max(t, c.start + self.frame()))
 
     def split(self, t: Fraction) -> bool:
@@ -199,12 +266,13 @@ class Session:
         return True
 
     def set_gain(self, db: float) -> None:
-        self.target.gain_db = round(max(MIN_GAIN_DB, min(MAX_GAIN_DB, db)), 2)
+        target = self.clip if self.sel_own else self.target  # a clip's own sound keeps its volume on the clip
+        target.gain_db = round(max(MIN_GAIN_DB, min(MAX_GAIN_DB, db)), 2)
 
     # ------------------------------------------------------------ sound lanes
 
     def add_sound(self, path: str, info: MediaInfo, at: Fraction) -> tuple[int, int]:
-        """Add a file's sound to a lane at montage time `at`, in the first lane where it does not overlap."""
+        """Add a file's sound at montage time `at`, in the first lane where it overlaps nothing (else the last lane)."""
         if info.audio is None:
             raise ValueError("this file has no sound")
         media = self._media_id(path, info)
@@ -212,17 +280,19 @@ class Session:
         while len(self.lanes) < LANES:
             self.lanes.append(AudioLane())
         item = AudioItem(media=media, start=Fraction(0), end=self.infos[media].duration, at=max(at, Fraction(0)))
-        lane = next((n for n in range(LANES) if not self._overlaps(n, item)), 0)
+        lane = next((n for n in range(LANES) if not self._overlaps(n, item)), LANES - 1)
         self.lanes[lane].items.append(item)
-        self.sel_audio = (lane, len(self.lanes[lane].items) - 1)
+        self.sel_audio, self.sel_own = (lane, len(self.lanes[lane].items) - 1), False
         return self.sel_audio
 
     def _overlaps(self, lane: int, item: AudioItem) -> bool:
         a0, a1 = item.at, item.at + (item.end - item.start)
-        return any(o is not item and o.at < a1 and a0 < o.at + (o.end - o.start) for o in self.lanes[lane].items)
+        return any(o.at < a1 and a0 < o.at + (o.end - o.start) for _, o, _ in self.lane_items(lane))
 
     def move_sound(self, at: Fraction, lane: int | None = None) -> None:
         """Move the selected sound item along the montage, and optionally to another lane."""
+        if self.sel_own:
+            self._unlink()
         cur, i = self.sel_audio
         item = self.lanes[cur].items[i]
         item.at = max(at, Fraction(0))
@@ -233,12 +303,18 @@ class Session:
 
     def remove_sound(self) -> None:
         self.checkpoint()
-        lane, i = self.sel_audio
-        del self.lanes[lane].items[i]
-        self.sel_audio = None
+        if self.sel_own:
+            self.clip.audio, self.clip.gain_db = False, 0.0
+        else:
+            lane, i = self.sel_audio
+            del self.lanes[lane].items[i]
+        self.clear_sound()
 
     def sound_at(self, lane: int, t: Fraction) -> tuple[AudioItem, Fraction] | None:
-        """The item playing in `lane` at montage time t, and the time within its source."""
+        """The stored item playing in `lane` at montage time t, and the time within its source.
+
+        Clips' own sounds are not included: they play with their clip.
+        """
         for it in self.lanes[lane].items if lane < len(self.lanes) else []:
             if it.at <= t < it.at + (it.end - it.start):
                 return it, it.start + (t - it.at)
@@ -351,7 +427,7 @@ class Session:
         while len(project.lanes) < LANES:
             project.lanes.append(AudioLane())
         self.project, self.infos = project, infos
-        self.selected, self.sel_audio = (0 if project.clips else -1), None
+        self.selected, self.sel_audio, self.sel_own = (0 if project.clips else -1), None, False
         self._undo.clear()
         self._redo.clear()
         self.file, self._saved = str(Path(file).resolve()), self._state()

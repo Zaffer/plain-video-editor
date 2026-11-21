@@ -254,22 +254,64 @@ class Editing(unittest.TestCase):
 
     def test_sound_lanes(self):
         s = self.session()
-        self.assertEqual(s.add_sound("/media/clip2.mp4", INFOS["clip2"], Fraction(0)), (0, 0))
-        s.set_in(Fraction(7)); s.set_out(Fraction(17))  # trims the sound item, not the clip
-        self.assertEqual((s.sound.start, s.sound.end, s.clips[1].start), (7, 17, 0))
-        self.assertEqual(s.add_sound("/media/clip2.mp4", INFOS["clip2"], Fraction(5)), (1, 0))  # overlaps: other lane
-        self.assertEqual(s.sound_at(0, Fraction(3)), (s.lanes[0].items[0], 10))
-        self.assertIsNone(s.sound_at(0, Fraction(10)))
-        s.select_sound(0, 0)
-        s.move_sound(Fraction(40), 1)
-        self.assertEqual((s.sel_audio, s.sound.at, len(s.lanes[0].items)), ((1, 1), 40, 0))
+        s.select(0); s.set_in(Fraction(5)); s.set_out(Fraction(15))  # montage 0-10, no sound
+        s.select(1); s.set_in(Fraction(7)); s.set_out(Fraction(17))  # montage 10-20, its own sound shows in lane 1
+        self.assertEqual([(ref, it.at, it.end - it.start, linked) for ref, it, linked in s.lane_items(0)], [(("own", 1), 10, 10, True)])
+        self.assertEqual(s.add_sound("/media/clip2.mp4", INFOS["clip2"], Fraction(0)), (1, 0))  # would overlap it: lane 2
+        s.set_in(Fraction(8)); s.set_out(Fraction(18))  # trims the sound item, not the clip
+        self.assertEqual((s.sound.start, s.sound.end, s.clips[1].start), (8, 18, 7))
+        self.assertEqual(s.add_sound("/media/clip2.mp4", INFOS["clip2"], Fraction(5)), (1, 1))  # no free lane: the last one
+        s.select_sound((1, 0))
+        self.assertEqual(s.sound_at(1, Fraction(3)), (s.lanes[1].items[0], 11))
+        self.assertIsNone(s.sound_at(1, Fraction(4000)))
+        self.assertIsNone(s.sound_at(0, Fraction(12)))  # a clip's own sound plays with its clip
+        s.move_sound(Fraction(40), 0)
+        self.assertEqual((s.sel_audio, s.sound.at, len(s.lanes[1].items)), ((0, 0), 40, 1))
         s.set_gain(-200); self.assertEqual(s.sound.gain_db, -60)
         s.remove_sound()
-        self.assertEqual((s.sel_audio, len(s.lanes[1].items)), (None, 1))
+        self.assertEqual((s.sel_audio, len(s.lanes[0].items)), (None, 0))
         self.assertTrue(s.undo())
-        self.assertEqual(len(s.lanes[1].items), 2)
+        self.assertEqual(len(s.lanes[0].items), 1)
         with self.assertRaises(ValueError):
             s.add_sound("/media/clip1.mp4", INFOS["clip1"], Fraction(0))  # clip1 has no sound
+
+    def test_a_clips_own_sound_is_a_linked_item_in_lane_1(self):
+        shown = lambda s: [(ref, it.at, it.start, it.end, linked) for ref, it, linked in s.lane_items(0)]
+        s = self.session()
+        s.select(0); s.set_in(Fraction(5)); s.set_out(Fraction(15))
+        s.select(1); s.set_in(Fraction(7)); s.set_out(Fraction(17))
+        s.select_sound(("own", 1))
+        self.assertEqual((s.sound_ref, s.sound_lane, s.selected, s.sound.at, s.sound.start), (("own", 1), 0, 1, 10, 7))
+        # it follows the clip through trims and reordering
+        s.select(1); s.set_in(Fraction(9))
+        s.move(1, 0)
+        self.assertEqual(shown(s), [(("own", 0), 0, 9, 17, True)])
+        self.assertEqual((s.lane_items(1), s.own_sound(1), s.own_sound(7)), ([], None, None))
+
+        t = Session()
+        t.add_media("/media/clip2.mp4", INFOS["clip2"])
+        t.set_in(Fraction(10)); t.set_out(Fraction(20))
+        t.select_sound(("own", 0))
+        t.set_gain(-6.0)  # its volume is the clip's volume; still linked
+        self.assertEqual((t.sound_ref, t.clip.gain_db, t.sound.gain_db), (("own", 0), -6.0, -6.0))
+        t.set_gain(0.0)
+        self.assertEqual(t.plan().kind, "copy")  # linked sound is still part of a lossless copy
+        # moving it by itself turns it into an ordinary item
+        t.checkpoint(); t.move_sound(Fraction(2))
+        self.assertEqual((t.sound_ref, t.clip.audio, shown(t)), ((0, 0), False, [((0, 0), 2, 10, 20, False)]))
+        self.assertEqual((t.plan().kind, [a.at for a in t.plan().audio]), ("encode", [2]))
+        self.assertTrue(t.undo())
+        self.assertEqual((t.sound_ref, t.clip.audio, t.plan().kind), (("own", 0), True, "copy"))
+        # so does trimming it by itself; the clip keeps its own in and out
+        t.checkpoint(); t.set_out(Fraction(15))
+        self.assertEqual((t.sound_ref, t.sound.end, t.clip.end, t.clip.audio), ((0, 0), 15, 20, False))
+        self.assertTrue(t.undo())
+        # removing it drops the clip's sound
+        t.remove_sound()
+        self.assertEqual((t.sound_ref, t.sound, t.clip.audio, shown(t)), (None, None, False, []))
+        self.assertEqual((t.plan().kind, t.plan().copy_audio), ("copy", False))  # a silent lossless copy
+        self.assertTrue(t.undo())
+        self.assertEqual(shown(t), [(("own", 0), 0, 10, 20, True)])
 
     def test_sound_under_both_clips_plans_two_sources(self):
         s = self.session()

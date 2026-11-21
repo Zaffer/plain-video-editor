@@ -4,6 +4,11 @@
 //!
 //! Either a video clip or a sound item is "the target": the thing the trim bar,
 //! the timestamps and the volume act on.
+//!
+//! Every sound is shown in a lane. A clip's own sound sits in lane 1 as a linked
+//! item: it is not stored as an item but follows the clip (trim, split, reorder)
+//! and stays part of a lossless copy. Moving or trimming it by itself turns it
+//! into an ordinary item, which no longer follows the clip.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -17,7 +22,7 @@ use crate::time::{self, r, to_f64, R};
 /// Smallest crop, in display pixels.
 pub const MIN_CROP: i64 = 16;
 pub const UNDO_LIMIT: usize = 200;
-/// Sound lanes besides the clips' own sound.
+/// Sound lanes; the clips' own sound shows in the first.
 pub const LANES: usize = 2;
 pub const MIN_GAIN_DB: f64 = -60.0;
 pub const MAX_GAIN_DB: f64 = 12.0;
@@ -48,6 +53,17 @@ pub enum Target {
     Clip(usize),
     /// (lane, item)
     Sound(usize, usize),
+    /// The own sound of this clip.
+    Own(usize),
+}
+
+/// A sound shown in a lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundRef {
+    /// A clip's own sound, by clip index: shown in lane 1 and linked to the clip.
+    Own(usize),
+    /// A stored item: (lane, index).
+    Item(usize, usize),
 }
 
 #[derive(Clone)]
@@ -56,6 +72,7 @@ struct Snapshot {
     lanes: Vec<AudioLane>,
     selected: Option<usize>,
     sel_audio: Option<(usize, usize)>,
+    sel_own: bool,
 }
 
 pub struct Session {
@@ -65,6 +82,8 @@ pub struct Session {
     pub selected: Option<usize>,
     /// (lane, item) when a sound item is the target.
     pub sel_audio: Option<(usize, usize)>,
+    /// The selected clip's own sound is the target.
+    pub sel_own: bool,
     /// Force exact cuts (always re-encode).
     pub exact: bool,
     /// A crop shape applies to every clip.
@@ -127,6 +146,7 @@ impl Session {
             infos: Infos::new(),
             selected: None,
             sel_audio: None,
+            sel_own: false,
             exact: false,
             lock_shape: true,
             file: None,
@@ -152,27 +172,70 @@ impl Session {
         self.selected.and_then(|i| self.project.clips.get(i))
     }
 
-    fn clip_mut(&mut self) -> Option<&mut Clip> {
-        self.selected.and_then(|i| self.project.clips.get_mut(i))
+    /// The selected sound item, if a sound item is the target. For a clip's own sound this is made from the clip.
+    pub fn sound(&self) -> Option<AudioItem> {
+        if self.sel_own {
+            return self.own_sound(self.selected?);
+        }
+        self.sel_audio.and_then(|(l, i)| self.project.lanes.get(l)?.items.get(i).cloned())
     }
 
-    /// The selected sound item, if a sound item is the target.
-    pub fn sound(&self) -> Option<&AudioItem> {
-        self.sel_audio.and_then(|(l, i)| self.project.lanes.get(l)?.items.get(i))
+    /// Clip i's own sound as it sits in lane 1, or None if the clip has none (or it was removed).
+    pub fn own_sound(&self, i: usize) -> Option<AudioItem> {
+        let c = self.project.clips.get(i)?;
+        if !c.audio || self.infos.get(&c.media)?.audio.is_none() {
+            return None;
+        }
+        Some(AudioItem { media: c.media.clone(), start: c.start, end: c.end, at: self.offsets()[i], gain_db: c.gain_db })
+    }
+
+    /// Everything shown in a lane, as (reference, item, linked): for lane 1 the clips' own sounds, then its items.
+    pub fn lane_items(&self, lane: usize) -> Vec<(SoundRef, AudioItem, bool)> {
+        let mut out = Vec::new();
+        if lane == 0 {
+            out.extend((0..self.project.clips.len()).filter_map(|i| Some((SoundRef::Own(i), self.own_sound(i)?, true))));
+        }
+        if let Some(l) = self.project.lanes.get(lane) {
+            out.extend(l.items.iter().enumerate().map(|(i, it)| (SoundRef::Item(lane, i), it.clone(), false)));
+        }
+        out
+    }
+
+    /// Which sound is the target, if one is.
+    pub fn sound_ref(&self) -> Option<SoundRef> {
+        match self.target()? {
+            Target::Own(i) => Some(SoundRef::Own(i)),
+            Target::Sound(l, i) => Some(SoundRef::Item(l, i)),
+            Target::Clip(_) => None,
+        }
+    }
+
+    /// The lane the selected sound is shown in.
+    pub fn sound_lane(&self) -> Option<usize> {
+        match self.sound_ref()? {
+            SoundRef::Own(_) => Some(0),
+            SoundRef::Item(lane, _) => Some(lane),
+        }
     }
 
     pub fn target(&self) -> Option<Target> {
-        match (self.sel_audio, self.selected) {
-            (Some((l, i)), _) if self.sound().is_some() => Some(Target::Sound(l, i)),
-            (_, Some(i)) if i < self.project.clips.len() => Some(Target::Clip(i)),
-            _ => None,
+        let clip = self.selected.filter(|&i| i < self.project.clips.len());
+        if self.sel_own {
+            if let Some(i) = clip.filter(|&i| self.own_sound(i).is_some()) {
+                return Some(Target::Own(i));
+            }
+        } else if let Some((l, i)) = self.sel_audio {
+            if self.project.lanes.get(l).is_some_and(|lane| i < lane.items.len()) {
+                return Some(Target::Sound(l, i));
+            }
         }
+        clip.map(Target::Clip)
     }
 
     /// (media id, in, out, gain) of the target.
     pub fn target_span(&self) -> Option<(&str, R, R, f64)> {
         match self.target()? {
-            Target::Clip(i) => {
+            Target::Clip(i) | Target::Own(i) => {
                 let c = &self.project.clips[i];
                 Some((&c.media, c.start, c.end, c.gain_db))
             }
@@ -214,17 +277,34 @@ impl Session {
 
     pub fn select(&mut self, i: usize) {
         self.selected = Some(i);
-        self.sel_audio = None;
+        self.clear_sound();
     }
 
-    pub fn select_sound(&mut self, lane: usize, i: usize) {
-        self.sel_audio = Some((lane, i));
+    /// Make a sound the target.
+    pub fn select_sound(&mut self, sound: SoundRef) {
+        match sound {
+            SoundRef::Own(i) => {
+                self.selected = Some(i);
+                self.sel_audio = None;
+                self.sel_own = true;
+            }
+            SoundRef::Item(lane, i) => {
+                self.sel_audio = Some((lane, i));
+                self.sel_own = false;
+            }
+        }
+    }
+
+    /// Back to the selected clip as the target.
+    pub fn clear_sound(&mut self) {
+        self.sel_audio = None;
+        self.sel_own = false;
     }
 
     // ------------------------------------------------------------ undo
 
     fn snapshot(&self) -> Snapshot {
-        Snapshot { clips: self.project.clips.clone(), lanes: self.project.lanes.clone(), selected: self.selected, sel_audio: self.sel_audio }
+        Snapshot { clips: self.project.clips.clone(), lanes: self.project.lanes.clone(), selected: self.selected, sel_audio: self.sel_audio, sel_own: self.sel_own }
     }
 
     /// Call before a change (once per gesture) so it can be undone.
@@ -242,6 +322,7 @@ impl Session {
         self.project.lanes = s.lanes;
         self.selected = s.selected;
         self.sel_audio = s.sel_audio;
+        self.sel_own = s.sel_own;
     }
 
     pub fn undo(&mut self) -> bool {
@@ -331,7 +412,7 @@ impl Session {
             Some(s) => Some(s.saturating_sub(1).min(n - 1)),
             None => None,
         };
-        self.sel_audio = None;
+        self.clear_sound();
     }
 
     /// Move clip i to position j. The caller checkpoints once per drag.
@@ -350,8 +431,26 @@ impl Session {
 
     // ------------------------------------------------------------ trimming (clip or sound item)
 
+    /// Turn the selected clip's own sound into an ordinary item in lane 1. It no longer follows the clip.
+    fn unlink(&mut self) {
+        let Some(Target::Own(i)) = self.target() else { return };
+        let Some(item) = self.own_sound(i) else { return };
+        let c = &mut self.project.clips[i];
+        c.audio = false;
+        c.gain_db = 0.0;
+        while self.project.lanes.len() < LANES {
+            self.project.lanes.push(AudioLane::default());
+        }
+        self.project.lanes[0].items.push(item);
+        self.sel_audio = Some((0, self.project.lanes[0].items.len() - 1));
+        self.sel_own = false;
+    }
+
+    /// The target's in and out, to change in place. A clip's own sound is unlinked first.
     fn span_mut(&mut self) -> Option<(&mut R, &mut R)> {
+        self.unlink();
         match self.target()? {
+            Target::Own(_) => None,
             Target::Clip(i) => {
                 let c = &mut self.project.clips[i];
                 Some((&mut c.start, &mut c.end))
@@ -398,7 +497,8 @@ impl Session {
     pub fn set_gain(&mut self, db: f64) {
         let db = (db.clamp(MIN_GAIN_DB, MAX_GAIN_DB) * 100.0).round() / 100.0;
         match self.target() {
-            Some(Target::Clip(i)) => self.project.clips[i].gain_db = db,
+            // a clip's own sound keeps its volume on the clip
+            Some(Target::Clip(i) | Target::Own(i)) => self.project.clips[i].gain_db = db,
             Some(Target::Sound(l, i)) => self.project.lanes[l].items[i].gain_db = db,
             None => {}
         }
@@ -408,10 +508,10 @@ impl Session {
 
     fn overlaps(&self, lane: usize, at: &R, duration: &R) -> bool {
         let (a0, a1) = (*at, *at + *duration);
-        self.project.lanes[lane].items.iter().any(|o| o.at < a1 && a0 < o.at + o.duration())
+        self.lane_items(lane).iter().any(|(_, o, _)| o.at < a1 && a0 < o.at + o.duration())
     }
 
-    /// Add a file's sound to a lane at montage time `at`, in the first lane where it does not overlap.
+    /// Add a file's sound at montage time `at`, in the first lane where it overlaps nothing (else the last lane).
     pub fn add_sound(&mut self, path: &str, info: MediaInfo, at: R) -> Result<(usize, usize), String> {
         if info.audio.is_none() {
             return Err("this file has no sound".into());
@@ -423,18 +523,17 @@ impl Session {
         }
         let duration = self.infos[&media].duration;
         let item = AudioItem { media, start: time::zero(), end: duration, at: at.max(time::zero()), gain_db: 0.0 };
-        let lane = (0..LANES).find(|&n| !self.overlaps(n, &item.at, &duration)).unwrap_or(0);
+        let lane = (0..LANES).find(|&n| !self.overlaps(n, &item.at, &duration)).unwrap_or(LANES - 1);
         self.project.lanes[lane].items.push(item);
         self.sel_audio = Some((lane, self.project.lanes[lane].items.len() - 1));
+        self.sel_own = false;
         Ok(self.sel_audio.unwrap())
     }
 
     /// Move the selected sound item along the montage, and optionally to another lane.
     pub fn move_sound(&mut self, at: R, lane: Option<usize>) {
-        let Some((cur, i)) = self.sel_audio else { return };
-        if self.sound().is_none() {
-            return;
-        }
+        self.unlink();
+        let Some(Target::Sound(cur, i)) = self.target() else { return };
         self.project.lanes[cur].items[i].at = at.max(time::zero());
         if let Some(to) = lane.filter(|&to| to != cur && to < self.project.lanes.len()) {
             let item = self.project.lanes[cur].items.remove(i);
@@ -444,16 +543,23 @@ impl Session {
     }
 
     pub fn remove_sound(&mut self) {
-        let Some((lane, i)) = self.sel_audio else { return };
-        if self.sound().is_none() {
-            return;
+        match self.target() {
+            Some(Target::Own(i)) => {
+                self.checkpoint();
+                self.project.clips[i].audio = false;
+                self.project.clips[i].gain_db = 0.0;
+            }
+            Some(Target::Sound(lane, i)) => {
+                self.checkpoint();
+                self.project.lanes[lane].items.remove(i);
+            }
+            _ => return,
         }
-        self.checkpoint();
-        self.project.lanes[lane].items.remove(i);
-        self.sel_audio = None;
+        self.clear_sound();
     }
 
-    /// The item playing in `lane` at montage time t, and the time within its source.
+    /// The stored item playing in `lane` at montage time t, and the time within its source.
+    /// Clips' own sounds are not included: they play with their clip.
     pub fn sound_at(&self, lane: usize, t: &R) -> Option<(&AudioItem, R)> {
         self.project.lanes.get(lane)?.items.iter().find(|it| it.at <= *t && *t < it.at + it.duration()).map(|it| (it, it.start + (*t - it.at)))
     }
@@ -508,12 +614,6 @@ impl Session {
         let x = rect.x.min(dw - w).max(0);
         let y = rect.y.min(dh - h).max(0);
         self.project.clips[i].crop = Some(Crop::Rect(Rect { x, y, w, h }));
-    }
-
-    pub fn set_sound_on(&mut self, on: bool) {
-        if let Some(c) = self.clip_mut() {
-            c.audio = on;
-        }
     }
 
     // ------------------------------------------------------------ montage timeline
@@ -616,7 +716,7 @@ impl Session {
             project.lanes.push(AudioLane::default());
         }
         self.selected = if project.clips.is_empty() { None } else { Some(0) };
-        self.sel_audio = None;
+        self.clear_sound();
         self.project = project;
         self.infos = infos;
         self.undo.clear();
@@ -767,24 +867,76 @@ mod tests {
 
     #[test]
     fn sound_lanes() {
-        let mut s = session();
-        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(0)), Ok((0, 0)));
-        s.set_in(int(7));
-        s.set_out(int(17)); // trims the sound item, not the clip
-        assert_eq!((s.sound().unwrap().start, s.sound().unwrap().end, s.clips()[1].start), (int(7), int(17), int(0)));
-        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(5)), Ok((1, 0))); // overlaps: other lane
-        assert_eq!(s.sound_at(0, &int(3)).map(|(_, t)| t), Some(int(10)));
-        assert!(s.sound_at(0, &int(10)).is_none());
-        s.select_sound(0, 0);
-        s.move_sound(int(40), Some(1));
-        assert_eq!((s.sel_audio, s.sound().unwrap().at, s.lanes()[0].items.len()), (Some((1, 1)), int(40), 0));
+        let mut s = trimmed(); // clip 1 is montage 0-10 with no sound; clip 2 is 10-20 and its own sound shows in lane 1
+        let shown: Vec<_> = s.lane_items(0).iter().map(|(r, it, linked)| (*r, it.at, it.duration(), *linked)).collect();
+        assert_eq!(shown, vec![(SoundRef::Own(1), int(10), int(10), true)]);
+        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(0)), Ok((1, 0))); // would overlap it: lane 2
+        s.set_in(int(8));
+        s.set_out(int(18)); // trims the sound item, not the clip
+        assert_eq!((s.sound().unwrap().start, s.sound().unwrap().end, s.clips()[1].start), (int(8), int(18), int(7)));
+        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(5)), Ok((1, 1))); // no free lane: the last one
+        s.select_sound(SoundRef::Item(1, 0));
+        assert_eq!(s.sound_at(1, &int(3)).map(|(_, t)| t), Some(int(11)));
+        assert!(s.sound_at(1, &int(4000)).is_none());
+        assert!(s.sound_at(0, &int(12)).is_none()); // a clip's own sound plays with its clip
+        s.move_sound(int(40), Some(0));
+        assert_eq!((s.sel_audio, s.sound().unwrap().at, s.lanes()[1].items.len()), (Some((0, 0)), int(40), 1));
         s.set_gain(-200.0);
         assert_eq!(s.sound().unwrap().gain_db, -60.0);
         s.remove_sound();
-        assert_eq!((s.sel_audio, s.lanes()[1].items.len()), (None, 1));
+        assert_eq!((s.sel_audio, s.lanes()[0].items.len()), (None, 0));
         assert!(s.undo());
-        assert_eq!(s.lanes()[1].items.len(), 2);
+        assert_eq!(s.lanes()[0].items.len(), 1);
         assert!(s.add_sound("/media/clip1.mp4", info("clip1"), int(0)).is_err()); // clip1 has no sound
+    }
+
+    #[test]
+    fn a_clips_own_sound_is_a_linked_item_in_lane_1() {
+        fn shown(s: &Session) -> Vec<(SoundRef, R, R, R, bool)> {
+            s.lane_items(0).iter().map(|(r, it, linked)| (*r, it.at, it.start, it.end, *linked)).collect()
+        }
+        let mut s = trimmed();
+        s.select_sound(SoundRef::Own(1));
+        let sound = s.sound().unwrap();
+        assert_eq!((s.sound_ref(), s.sound_lane(), s.selected, sound.at, sound.start), (Some(SoundRef::Own(1)), Some(0), Some(1), int(10), int(7)));
+        // it follows the clip through trims and reordering
+        s.select(1);
+        s.set_in(int(9));
+        s.move_clip(1, 0);
+        assert_eq!(shown(&s), vec![(SoundRef::Own(0), int(0), int(9), int(17), true)]);
+        assert!(s.lane_items(1).is_empty() && s.own_sound(1).is_none() && s.own_sound(7).is_none());
+
+        let kind = |t: &Session| t.plan().unwrap().unwrap().kind;
+        let mut t = Session::new();
+        t.add_media("/media/clip2.mp4", info("clip2")).unwrap();
+        t.set_in(int(10));
+        t.set_out(int(20));
+        t.select_sound(SoundRef::Own(0));
+        t.set_gain(-6.0); // its volume is the clip's volume; still linked
+        assert_eq!((t.sound_ref(), t.clip().unwrap().gain_db, t.sound().unwrap().gain_db), (Some(SoundRef::Own(0)), -6.0, -6.0));
+        t.set_gain(0.0);
+        assert_eq!(kind(&t), Kind::Copy); // linked sound is still part of a lossless copy
+        // moving it by itself turns it into an ordinary item
+        t.checkpoint();
+        t.move_sound(int(2), None);
+        assert_eq!((t.sound_ref(), t.clip().unwrap().audio), (Some(SoundRef::Item(0, 0)), false));
+        assert_eq!(shown(&t), vec![(SoundRef::Item(0, 0), int(2), int(10), int(20), false)]);
+        let p = t.plan().unwrap().unwrap();
+        assert_eq!((p.kind, p.audio.iter().map(|a| a.at).collect::<Vec<_>>()), (Kind::Encode, vec![int(2)]));
+        assert!(t.undo());
+        assert_eq!((t.sound_ref(), t.clip().unwrap().audio, kind(&t)), (Some(SoundRef::Own(0)), true, Kind::Copy));
+        // so does trimming it by itself; the clip keeps its own in and out
+        t.checkpoint();
+        t.set_out(int(15));
+        assert_eq!((t.sound_ref(), t.sound().unwrap().end, t.clip().unwrap().end, t.clip().unwrap().audio), (Some(SoundRef::Item(0, 0)), int(15), int(20), false));
+        assert!(t.undo());
+        // removing it drops the clip's sound
+        t.remove_sound();
+        assert_eq!((t.sound_ref(), t.sound(), t.clip().unwrap().audio, shown(&t)), (None, None, false, vec![]));
+        let p = t.plan().unwrap().unwrap();
+        assert_eq!((p.kind, p.copy_audio), (Kind::Copy, false)); // a silent lossless copy
+        assert!(t.undo());
+        assert_eq!(shown(&t), vec![(SoundRef::Own(0), int(0), int(10), int(20), true)]);
     }
 
     #[test]

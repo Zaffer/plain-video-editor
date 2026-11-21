@@ -620,6 +620,7 @@ dependencies = [
 name = "pve-gtk"
 version = "0.1.0"
 dependencies = [
+ "cairo-rs",
  "gtk4",
  "pangocairo",
  "pve-core",

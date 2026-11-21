@@ -207,6 +207,57 @@ def script(w):
     key(w, Gdk.KEY_z, Gdk.ModifierType.CONTROL_MASK); yield 0.4
     check("undo split", len(s.clips) == 2 and s.clips[1].end == 17)
 
+    # --- montage: drag the play line across the clips (clip 1 is 5-15, clip 2 is 7-17)
+    before = ([(c.start, c.end) for c in s.clips], len(s._undo))
+    lx = tl._line_x()
+    check("montage play line is grabbable along its whole height",
+          tl.line_hit(lx + 4) and not tl.line_hit(lx + 30)
+          and (tl.cursor(lx, tl.CLIP_Y + 5), tl.cursor(lx, tl.LANE_Y + 30), tl.cursor(lx + 30, tl.LANE_Y + 30)) == ("grab", "grab", None))
+    tl._begin(None, lx + 3, tl.LANE_Y + 30); tl._update(None, tl._x(4.0) - lx, 0)
+    yield 0.6
+    check("dragging the play line back enters clip 1", s.selected == 0 and abs(w.pos - 9.0) < 0.05 and abs(tl.pos - 4.0) < 0.05, (s.selected, w.pos, tl.pos))
+    tl._update(None, tl._x(16.0) - lx, 0); tl._end(None, tl._x(16.0) - lx, 0)
+    yield 0.6
+    check("dragging it on enters clip 2", s.selected == 1 and abs(w.pos - 13.0) < 0.05 and abs(tl.pos - 16.0) < 0.05, (s.selected, w.pos, tl.pos))
+    tl._begin(None, tl._line_x(), tl.CLIP_Y + 5); tl._update(None, 5000, 0); tl._end(None, 5000, 0)
+    yield 0.5
+    check("the play line stops at the end of the montage", s.selected == 1 and abs(w.pos - 17.0) < 0.05, (s.selected, w.pos))
+    check("scrubbing the montage edits nothing", before == ([(c.start, c.end) for c in s.clips], len(s._undo)), before)
+    tl._begin(None, tl._x(4.0), tl.CLIP_Y + 5); tl._end(None, 0, 0)
+    yield 0.5
+    tl._begin(None, tl._line_x() + 2, tl.CLIP_Y + 5); tl._end(None, 0, 0)
+    yield 0.4
+    check("pressing the line without dragging is a click on the clip under it", s.selected == 0 and abs(w.pos - 9.0) < 0.2, (s.selected, w.pos))
+
+    # --- clip 2's own sound shows in lane 1, joined to its clip
+    undo = lambda: key(w, Gdk.KEY_z, Gdk.ModifierType.CONTROL_MASK)
+    check("clip 2's own sound is shown in lane 1 under its clip",
+          tl.sounds == [[("clip2", 10.0, 10.0, True)], []] and s.lanes[0].items == [], tl.sounds)
+    lane1_y = tl.LANE_Y + 5
+    tl._begin(None, tl._x(15.0), lane1_y); tl._end(None, 0, 0)
+    yield 0.5
+    check("pressing it selects it as a sound", s.sound_ref == ("own", 1) and s.selected == 1 and tl.sel_sound == (0, 0)
+          and (w.in_entry.get_text(), w.out_entry.get_text()) == ("0:07.000", "0:17.000"), (s.sound_ref, tl.sel_sound))
+    w.volume.set_value(50); yield 0.3
+    check("its volume is the clip's volume, and it stays linked", abs(s.clips[1].gain_db + 6.02) < 0.01 and s.sound_ref == ("own", 1), s.clips[1].gain_db)
+    undo(); yield 0.3
+    w.hear[0].set_active(False); yield 0.3
+    check("lane 1 can be muted for the preview only", tl.muted == [True, False] and w.player._sound[0] is False
+          and w._plan.audio and s.clips[1].audio, (tl.muted, w.player._sound))
+    w.hear[0].set_active(True); yield 0.3
+    check("and heard again", tl.muted == [False, False] and w.player._sound[0] is True, w.player._sound)
+    tl._begin(None, tl._x(15.0), lane1_y); tl._update(None, 60, 0); tl._end(None, 60, 0)
+    yield 0.4
+    check("dragging it by itself unlinks it from the clip", s.sound_ref == (0, 0) and not s.clips[1].audio and len(s.lanes[0].items) == 1
+          and s.lanes[0].items[0].at > 10 and tl.sounds[0][0][3] is False, (s.sound_ref, tl.sounds))
+    undo(); yield 0.4
+    check("undo links it again", s.sound_ref == ("own", 1) and s.clips[1].audio and not s.lanes[0].items, s.sound_ref)
+    key(w, Gdk.KEY_Delete); yield 0.4
+    check("Delete removes the clip's sound", not s.clips[1].audio and tl.sounds == [[], []] and s.sound is None and s.selected == 1, tl.sounds)
+    undo(); yield 0.4
+    key(w, Gdk.KEY_Escape); yield 0.4
+    check("undo brings it back", s.clips[1].audio and tl.sounds[0] == [("clip2", 10.0, 10.0, True)] and s.sound is None, tl.sounds)
+
     # --- sound lane: clip 2's sound under clip 1
     tl._begin(None, tl._spans()[0][0] + 1, tl.CLIP_Y + 5); tl._end(None, 0, 0)
     yield 0.5
@@ -215,30 +266,30 @@ def script(w):
     t1 = time.monotonic()
     while s.sound is None and time.monotonic() - t1 < 8:
         yield 0.2
-    check("sound added at the play position", s.sound is not None and s.sound.at == 0 and s.sel_audio == (0, 0), (s.sel_audio, s.sound and s.sound.at))
+    check("sound added at the play position, in the lane that is free", s.sound is not None and s.sound.at == 0 and s.sel_audio == (1, 0), (s.sel_audio, s.sound and s.sound.at))
     type_time(w, w.in_entry, "7"); type_time(w, w.out_entry, "17"); yield 0.4
     check("sound item trimmed by typing", (s.sound.start, s.sound.end) == (7, 17))
-    check("sound mode disables clip-only controls", not w.sound.get_sensitive() and w.crop.rect is None)
+    check("sound mode disables clip-only controls", not w.lock.get_sensitive() and w.crop.rect is None)
     key(w, Gdk.KEY_Escape); yield 0.5
     check("Escape returns to the clip", s.sound is None and s.selected == 0)
     check("plan mixes the lane and clip 2's own sound", w._plan and sorted(float(a.at) for a in w._plan.audio) == [0.0, 10.0],
           [str(a) for a in (w._plan.audio if w._plan else [])])
 
     # --- drag the sound item along the montage and to the other lane
-    lane_y = tl.LANE_Y + 5
+    lane_y = tl.LANE_Y + tl.LANE_H + tl.LANE_GAP + 5  # lane 2
     xa = tl._x(1.0)
-    check("sound item hit-testing", tl._sound_hit(xa, lane_y) == (0, 0), tl._sound_hit(xa, lane_y))
+    check("sound item hit-testing", tl._sound_hit(xa, lane_y) == (1, 0), tl._sound_hit(xa, lane_y))
     tl._begin(None, xa, lane_y); tl._update(None, 60, 0); tl._end(None, 60, 0)
     yield 0.4
-    moved = float(s.lanes[0].items[0].at)
-    check("sound drag moves it in time", moved > 0.5 and s.sel_audio == (0, 0), moved)
+    moved = float(s.lanes[1].items[0].at)
+    check("sound drag moves it in time", moved > 0.5 and s.sel_audio == (1, 0), moved)
     xa = tl._x(moved + 1.0)
-    tl._begin(None, xa, lane_y); tl._update(None, 0, tl.LANE_H + tl.LANE_GAP); tl._end(None, 0, tl.LANE_H + tl.LANE_GAP)
+    tl._begin(None, xa, lane_y); tl._update(None, 0, -(tl.LANE_H + tl.LANE_GAP)); tl._end(None, 0, -(tl.LANE_H + tl.LANE_GAP))
     yield 0.4
-    check("sound drag changes lane", s.sel_audio == (1, 0) and not s.lanes[0].items, s.sel_audio)
+    check("sound drag changes lane", s.sel_audio == (0, 0) and not s.lanes[1].items and tl.sel_sound == (0, 1), (s.sel_audio, tl.sel_sound))
     key(w, Gdk.KEY_z, Gdk.ModifierType.CONTROL_MASK); key(w, Gdk.KEY_z, Gdk.ModifierType.CONTROL_MASK)
     yield 0.5
-    check("undo puts the sound back", len(s.lanes[0].items) == 1 and s.lanes[0].items[0].at == 0, [str(i) for i in s.lanes[0].items])
+    check("undo puts the sound back", len(s.lanes[1].items) == 1 and s.lanes[1].items[0].at == 0, [str(i) for i in s.lanes[1].items])
     key(w, Gdk.KEY_Escape); yield 0.4
 
     # --- volume
@@ -263,13 +314,13 @@ def script(w):
     while (len(s.clips) != 2 or s.dirty) and time.monotonic() - t1 < 10:
         yield 0.2
     yield 0.5
-    check("reopened project", len(s.clips) == 2 and len(s.lanes[0].items) == 1 and s.clips[0].crop_aspect == Fraction(4, 3) and not s.dirty)
+    check("reopened project", len(s.clips) == 2 and len(s.lanes[1].items) == 1 and s.clips[0].crop_aspect == Fraction(4, 3) and not s.dirty)
 
     # --- playback: carries on into clip 2, with the lane playing in step
     w._seek(14.5); yield 0.6
     w.toggle_play()
     yield 0.35
-    lp = w.lane_players[0]
+    lp = w.lane_players[1]
     lane_now, want = lp.position(), 7 + (w.pos - 5)
     check("lane sound plays in step with the clip", lp.path == FILES[1] and lane_now is not None and abs(lane_now - want) < 0.3,
           (lp.path, lane_now, round(want, 3)))
@@ -280,7 +331,7 @@ def script(w):
     check("playback carried on into clip 2", s.selected == 1 and w.pos >= 7.0, (s.selected, round(w.pos, 3)))
     w.player.set_playing(False); yield 0.3
     check("lane pauses with the clip", lp.paused)
-    check("second lane's player was never started", w.lane_players[1].mpv is None)
+    check("lane 1 holds only clip 2's own sound, so its player was never started", w.lane_players[0].mpv is None)
 
     # --- export through the window
     out = OUT + ".mp4"

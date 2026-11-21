@@ -28,8 +28,9 @@ cd rust && cargo build --release --workspace     # Rust
 rust/target/release/pve-gui clip1.mp4 clip2.mp4
 ```
 
-Files can also be added with **Add video**, or dropped on the window. A sound
-file (or **Add sound**) goes into a sound lane under the clips.
+Files can also be added with **Add video**, or dropped on the window. A video's
+own sound appears in sound lane 1 under its clip. A sound file (or **Add
+sound**) goes into whichever lane is free at the play position.
 
 ## The window
 
@@ -40,28 +41,38 @@ file (or **Add sound**) goes into a sound lane under the clips.
 │                           preview                                │
 │                 crop rectangle drawn over it                     │
 │                                                                  │
-│ ▶  [position] / total   In [..] Out [..] length   Sound ─●─ Crop │
-│      ■  play position: drag the knob, or click this top band     │
+│ ▶  [position] / total  In [..] Out [..] length Sound[1][2]─●─ Crop│
+│      ▼  play position: drag the triangle, or click this band     │
 │  ░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│░░░░░░░   the selected clip's whole source │
-│     ■                  ■         in and out: drag the knobs      │
-│ [ clip 1        ][ clip 2      ]  the montage, in order          │
-│ [ sound                ]          two sound lanes                │
+│     ▶                  ◀         in and out: drag the triangles  │
+│ [ clip 1   │    ][ clip 2      ]  the montage, in order; drag    │
+│            │     [ clip 2 sound ]  lane 1: each clip's own sound  │
+│ [ music    │           ]          lane 2; drag the line to scrub │
 │ Lossless copy · 0:11.700 · cuts move out to keyframes, +1.7 s    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- **Trim bar.** The play position has a knob above the bar; the in and out
-  points have knobs below it. Dragging a cut point shows that frame but leaves
+- **Trim bar.** The play position has a triangle above the bar; the in and out
+  points have triangles below it, pointing at their lines. Dragging a cut point shows that frame but leaves
   the play position where it was. Clicking the bar itself, away from a line,
   does nothing. Scroll to zoom around the pointer; Shift+scroll pans.
 - **Times.** Position, In and Out can be typed: `83.5`, `1:23.5`, `1:02:03.25`.
 - **Crop.** Pick a shape; it applies to every clip unless **All clips** is off.
   Drag the rectangle or its corners. **Free** is any shape, for the selected clip.
-- **Montage.** Click a clip to select it; drag to reorder. Playback carries on
-  from one clip into the next.
-- **Sound.** Each clip keeps or drops its own sound (**Sound**) and has a volume.
-  A sound item in a lane is selected by clicking it, trimmed in the same trim
-  bar, and moved by dragging (between lanes too).
+- **Montage.** Click a clip to select it; drag to reorder. Drag the play line
+  (anywhere along its height) to scrub through the whole montage. Playback
+  carries on from one clip into the next.
+- **Sound.** Every sound is an item in one of the two lanes. Click an item to
+  select it; then the trim bar, the times and the volume act on it, Delete
+  removes it, and dragging moves it (between lanes too). Items that overlap
+  are mixed in the export, whether they share a lane or not.
+- **A clip's own sound** sits in lane 1, drawn joined to its clip. While it is
+  linked it follows the clip through trims, splits and reordering, and the
+  export can still be a lossless copy. Moving or trimming it by itself unlinks
+  it: from then on it is an ordinary item that stays where you put it (undo
+  links it again).
+- **Sound 1 / 2** choose which lanes you hear in the preview while editing.
+  They do not change the export, which always has every sound shown.
 - **Bottom line.** Always says what Export will do: a lossless copy, and how
   far the cuts move to reach keyframes (shown paler on the trim bar), or a
   re-encode with the output size and the reason. **Exact cuts** forces a re-encode.
@@ -85,7 +96,7 @@ Closing the window never loses an edit: the session is kept and
 ## What export does
 
 - **Lossless copy** when the edit is only trims and joins of clips with the
-  same format, no crop, no volume change and no sound lanes. Cuts land on
+  same format, no crop, no volume change and no sound besides the clips' own. Cuts land on
   keyframes: the start moves earlier and the end later, never the other way.
 - **Re-encode** otherwise: H.264 in MP4 at visually transparent quality
   (x264, CRF 18). The output is as large as the largest clip after cropping;
@@ -157,5 +168,8 @@ code with pixel coordinates; they do not send real pointer events.
 - Frame-accurate lossless cutting ("smart cut") is not implemented.
 - Lane sound in the preview is played by a second player and can be a few
   hundredths of a second out; the export is exact.
+- The preview plays one item per lane at a time. Where two items overlap in
+  the same lane, only one of them is heard in the preview; the export mixes
+  both.
 - Rotated phone clips and variable-frame-rate clips are handled by design but
   have not been tested on real files.

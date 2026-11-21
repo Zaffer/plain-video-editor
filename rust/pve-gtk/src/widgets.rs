@@ -35,6 +35,15 @@ fn fill(cr: &cairo::Context, c: Rgba, x: f64, y: f64, w: f64, h: f64) {
     }
 }
 
+fn triangle(cr: &cairo::Context, c: Rgba, p: [(f64, f64); 3]) {
+    cr.set_source_rgba(c.0, c.1, c.2, c.3);
+    cr.move_to(p[0].0, p[0].1);
+    cr.line_to(p[1].0, p[1].1);
+    cr.line_to(p[2].0, p[2].1);
+    cr.close_path();
+    let _ = cr.fill();
+}
+
 fn text(area: &gtk::DrawingArea, cr: &cairo::Context, s: &str, c: Rgba, x: f64, y_mid: f64, clip: Option<(f64, f64, f64, f64)>) {
     let layout = area.create_pango_layout(Some(s));
     let _ = cr.save();
@@ -249,6 +258,14 @@ impl TrimBar {
     pub fn set_pointer(&self, x: f64, y: f64) {
         self.st.borrow_mut().pointer = (x, y);
     }
+
+    /// For tests: draw the bar as it is now. Works while the window is hidden.
+    pub fn paint(&self, cr: &cairo::Context) {
+        let mut st = self.st.borrow_mut();
+        st.geom.width = self.area.width() as f64;
+        st.geom.height = self.area.height() as f64;
+        draw_trim(&self.area, cr, &st);
+    }
 }
 
 fn draw_trim(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TrimState) {
@@ -286,20 +303,23 @@ fn draw_trim(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TrimState) {
             fill(cr, tick, g.x(*k).round(), bot - 5.0, 1.0, 5.0);
         }
     }
-    // in and out: a line through the source and a knob below, hanging outside the kept range
+    // in and out: a line through the source, and below it a triangle pointing at the line
+    // from outside the kept range (in points right, out points left)
     let white = fg(area, 1.0);
-    for (t, west) in [(g.start, true), (g.end, false)] {
+    let ky = bot + 3.0;
+    for (t, side) in [(g.start, -1.0), (g.end, 1.0)] {
         if (v0..=v1).contains(&t) {
             let x = g.x(t);
-            fill(cr, white, x - 1.0, top - 2.0, 2.0, bot - top + 4.0);
-            fill(cr, white, if west { x - KNOB } else { x }, bot + 2.0, KNOB, KNOB);
+            fill(cr, white, x - 1.0, top - 2.0, 2.0, ky + KNOB - top + 2.0);
+            triangle(cr, white, [(x + side * KNOB, ky), (x + side * KNOB, ky + KNOB), (x, ky + KNOB / 2.0)]);
         }
     }
-    // play position: a line and a knob above
+    // play position: a line, and a triangle above pointing down at it
     if (v0..=v1).contains(&g.pos) {
         let x = g.x(g.pos);
-        fill(cr, with(PLAYHEAD, 1.0), x - 1.0, top - 2.0, 2.0, bot - top + 4.0);
-        fill(cr, with(PLAYHEAD, 1.0), x - KNOB / 2.0, 2.0, KNOB, KNOB);
+        let red = with(PLAYHEAD, 1.0);
+        fill(cr, red, x - 1.0, 2.0 + KNOB / 2.0, 2.0, bot + 2.0 - (2.0 + KNOB / 2.0));
+        triangle(cr, red, [(x - KNOB / 2.0, 2.0), (x + KNOB / 2.0, 2.0), (x, 2.0 + KNOB)]);
     }
     // when zoomed in: a thin strip showing which part of the source is visible
     if v1 - v0 < g.duration {
@@ -316,16 +336,22 @@ enum TimelineDrag {
     Clip(usize),
     /// Seconds from the start of the sound item to where it was grabbed.
     Sound(f64),
+    /// The play line; pixels from the pointer to the line where it was grabbed.
+    Play(f64),
 }
 
 struct TimelineState {
     geom: TimelineGeom,
     selected: Option<usize>,
     sel_sound: Option<(usize, usize)>,
+    /// Per lane: not heard in the preview.
+    muted: Vec<bool>,
     pos: f64,
     drag: Option<TimelineDrag>,
     moved: bool,
     origin: (f64, f64),
+    /// Where the pointer was last seen during a drag.
+    last: (f64, f64),
 }
 
 #[derive(Clone)]
@@ -340,6 +366,8 @@ pub struct Timeline {
     pub on_sound_select: Rc<Callback<(usize, usize)>>,
     /// (at, lane, final): the selected sound item is dragged.
     pub on_sound_move: Rc<Callback<(f64, Option<usize>, bool)>>,
+    /// (montage time, final): the play line is dragged.
+    pub on_scrub: Rc<Callback<(f64, bool)>>,
 }
 
 impl Timeline {
@@ -349,10 +377,12 @@ impl Timeline {
             geom: TimelineGeom { lanes, ..TimelineGeom::default() },
             selected: None,
             sel_sound: None,
+            muted: Vec::new(),
             pos: 0.0,
             drag: None,
             moved: false,
             origin: (0.0, 0.0),
+            last: (0.0, 0.0),
         }));
         let tl = Timeline {
             area,
@@ -361,6 +391,7 @@ impl Timeline {
             on_move: Rc::new(RefCell::new(None)),
             on_sound_select: Rc::new(RefCell::new(None)),
             on_sound_move: Rc::new(RefCell::new(None)),
+            on_scrub: Rc::new(RefCell::new(None)),
         };
         let s = tl.st.clone();
         tl.area.set_draw_func(move |area, cr, w, h| {
@@ -381,26 +412,28 @@ impl Timeline {
         let motion = gtk::EventControllerMotion::new();
         let t = tl.clone();
         motion.connect_motion(move |_, x, y| {
-            let over = {
+            let name = {
                 let mut st = t.st.borrow_mut();
+                if st.drag.is_some() {
+                    return;
+                }
                 st.geom.width = t.area.width() as f64;
-                st.drag.is_none() && st.geom.sound_hit(x, y).is_some()
+                st.geom.cursor(st.pos, x, y)
             };
-            if t.st.borrow().drag.is_none() {
-                t.area.set_cursor_from_name(over.then_some("grab"));
-            }
+            t.area.set_cursor_from_name(name);
         });
         tl.area.add_controller(motion);
         tl
     }
 
-    pub fn update(&self, clips: Vec<(String, f64)>, selected: Option<usize>, sounds: Vec<Vec<SoundBox>>, sel_sound: Option<(usize, usize)>, pos: f64) {
+    pub fn update(&self, clips: Vec<(String, f64)>, selected: Option<usize>, sounds: Vec<Vec<SoundBox>>, sel_sound: Option<(usize, usize)>, pos: f64, muted: Vec<bool>) {
         {
             let mut st = self.st.borrow_mut();
             st.geom.clips = clips;
             st.geom.sounds = sounds;
             st.selected = selected;
             st.sel_sound = sel_sound;
+            st.muted = muted;
             st.pos = pos;
         }
         self.area.queue_draw();
@@ -417,12 +450,38 @@ impl Timeline {
         g
     }
 
+    /// Montage time of the play line.
+    pub fn pos(&self) -> f64 {
+        self.st.borrow().pos
+    }
+
+    /// For tests: which sound is drawn selected, and which lanes are drawn muted.
+    pub fn shown(&self) -> (Option<(usize, usize)>, Vec<bool>) {
+        let st = self.st.borrow();
+        (st.sel_sound, st.muted.clone())
+    }
+
+    /// For tests: draw the timeline as it is now. Works while the window is hidden.
+    pub fn paint(&self, cr: &cairo::Context) {
+        let mut st = self.st.borrow_mut();
+        st.geom.width = self.area.width() as f64;
+        draw_timeline(&self.area, cr, &st, self.area.height() as f64);
+    }
+
     pub fn press(&self, x: f64, y: f64) {
         let sound = {
             let mut st = self.st.borrow_mut();
             st.geom.width = self.area.width() as f64;
             st.origin = (x, y);
+            st.last = (x, y);
             st.moved = false;
+            if st.geom.line_hit(st.pos, x) {
+                // keep the line where it was grabbed, not under the pointer
+                st.drag = Some(TimelineDrag::Play(st.geom.line_x(st.pos) - x));
+                drop(st);
+                self.area.set_cursor_from_name(Some("grabbing"));
+                return;
+            }
             match st.geom.sound_hit(x, y) {
                 Some((lane, i)) => {
                     st.drag = Some(TimelineDrag::Sound(st.geom.t(x) - st.geom.sounds[lane][i].at));
@@ -444,15 +503,25 @@ impl Timeline {
         enum Act {
             Sound(f64, Option<usize>),
             Clip(usize, usize),
+            Scrub(f64),
         }
         let act = {
             let mut st = self.st.borrow_mut();
             let Some(drag) = st.drag else { return };
-            if dx.abs() < 6.0 && dy.abs() < 6.0 && !st.moved {
+            let (x, y) = (st.origin.0 + dx, st.origin.1 + dy);
+            st.last = (x, y);
+            let still = match drag {
+                TimelineDrag::Play(_) => dx.abs() < 2.0,
+                _ => dx.abs() < 6.0 && dy.abs() < 6.0,
+            };
+            if still && !st.moved {
                 return;
             }
-            let (x, y) = (st.origin.0 + dx, st.origin.1 + dy);
             match drag {
+                TimelineDrag::Play(offset) => {
+                    st.moved = true;
+                    Some(Act::Scrub(st.geom.time_at(x + offset)))
+                }
                 TimelineDrag::Sound(grab) => {
                     st.moved = true;
                     Some(Act::Sound((st.geom.t(x) - grab).max(0.0), st.geom.lane_at(y)))
@@ -470,28 +539,39 @@ impl Timeline {
         match act {
             Some(Act::Sound(at, lane)) => call(&self.on_sound_move, (at, lane, false)),
             Some(Act::Clip(src, dst)) => call(&self.on_move, (src, dst, false)),
+            Some(Act::Scrub(t)) => call(&self.on_scrub, (t, false)),
             None => {}
         }
     }
 
     pub fn release(&self) {
-        let (drag, moved, origin, click) = {
+        let (drag, moved, last, click, sound) = {
             let mut st = self.st.borrow_mut();
             let Some(drag) = st.drag.take() else { return };
-            (drag, st.moved, st.origin, st.geom.clip_hit(st.origin.0, st.origin.1))
+            let (x, y) = st.origin;
+            (drag, st.moved, st.last, st.geom.clip_hit(x, y), st.geom.sound_hit(x, y))
         };
-        let _ = origin;
-        match (drag, moved) {
-            (TimelineDrag::Sound(_), true) => call(&self.on_sound_move, (0.0, None, true)),
-            (TimelineDrag::Clip(i), true) => call(&self.on_move, (i, i, true)),
-            (TimelineDrag::Clip(_), false) => {
+        match (drag, moved, sound) {
+            (TimelineDrag::Play(offset), true, _) => {
+                let t = self.st.borrow().geom.time_at(last.0 + offset);
+                call(&self.on_scrub, (t, true));
+            }
+            (TimelineDrag::Sound(_), true, _) => call(&self.on_sound_move, (0.0, None, true)),
+            (TimelineDrag::Clip(i), true, _) => call(&self.on_move, (i, i, true)),
+            // pressing the play line without dragging is a click on whatever is under it
+            (TimelineDrag::Play(_), false, Some(hit)) => call(&self.on_sound_select, hit),
+            (TimelineDrag::Clip(_) | TimelineDrag::Play(_), false, _) => {
                 if let Some(hit) = click {
                     call(&self.on_select, hit);
                 }
             }
             _ => {}
         }
-        self.area.set_cursor_from_name(None);
+        let name = {
+            let st = self.st.borrow();
+            st.geom.cursor(st.pos, last.0, last.1)
+        };
+        self.area.set_cursor_from_name(name);
     }
 }
 
@@ -513,7 +593,7 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
         if lane == 0 && !any_sound {
             text(area, cr, "sound: press Add sound, or drop a sound file", fg(area, 0.4), PAD + 8.0, y + TimelineGeom::LANE_H / 2.0, None);
         }
-        let lane_clip = (PAD, y, w - 2.0 * PAD, TimelineGeom::LANE_H);
+        let quiet = st.muted.get(lane).copied().unwrap_or(false);
         for (i, s) in items.iter().enumerate() {
             let sel = st.sel_sound == Some((lane, i));
             let x0 = g.x(s.at).max(PAD);
@@ -522,19 +602,24 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
                 continue;
             }
             let b = (x0, y, x1 - x0, TimelineGeom::LANE_H);
-            fill(cr, with(SOUND, if sel { 0.95 } else { 0.5 }), b.0, b.1, b.2, b.3);
+            let color = with(SOUND, (if sel { 0.95 } else { 0.5 }) * if quiet { 0.35 } else { 1.0 });
+            fill(cr, color, b.0, b.1, b.2, b.3);
+            if s.linked {
+                // joined to the clip above it
+                let top = TimelineGeom::CLIP_Y + TimelineGeom::CLIP_H;
+                fill(cr, color, b.0 + 1.0, top, b.2 - 2.0, y - top);
+            }
             if sel {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
                 cr.set_line_width(1.0);
                 cr.rectangle(b.0 + 0.5, b.1 + 0.5, b.2 - 1.0, b.3 - 1.0);
                 let _ = cr.stroke();
             }
-            text(area, cr, &s.label, (1.0, 1.0, 1.0, 1.0), b.0 + 6.0, y + TimelineGeom::LANE_H / 2.0, Some(b));
+            text(area, cr, &s.label, (1.0, 1.0, 1.0, if quiet { 0.45 } else { 1.0 }), b.0 + 6.0, y + TimelineGeom::LANE_H / 2.0, Some(b));
         }
-        let _ = lane_clip;
     }
     if g.total() > 0.0 {
-        fill(cr, with(PLAYHEAD, 1.0), g.x(st.pos).min(w - PAD) - 1.0, 0.0, 2.0, h);
+        fill(cr, with(PLAYHEAD, 1.0), g.line_x(st.pos) - 1.0, 0.0, 2.0, h);
     }
 }
 

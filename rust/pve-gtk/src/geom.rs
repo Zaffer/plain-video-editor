@@ -20,9 +20,9 @@ pub enum TrimHit {
 
 /// The trim bar: the source of the thing being trimmed, in three bands.
 ///
-///   top     the play position: a knob to drag, and clicking here moves it
+///   top     the play position: a down-pointing triangle to drag, and clicking here moves it
 ///   middle  the source, with the kept range, keyframe ticks, and the three lines
-///   bottom  knobs for the in and out points
+///   bottom  triangles for the in and out points, each pointing at its line from outside the kept range
 ///
 /// Clicking the middle band away from a line does nothing, so a missed grab never moves anything.
 #[derive(Debug, Clone, PartialEq)]
@@ -137,9 +137,14 @@ pub struct SoundBox {
     pub label: String,
     pub at: f64,
     pub seconds: f64,
+    /// A clip's own sound: drawn joined to its clip.
+    pub linked: bool,
 }
 
 /// The montage: clips in order (widths in proportion to their length) and the sound lanes under them.
+///
+/// Sound items are addressed by (lane, index into what is shown in that lane).
+/// The play line can be grabbed anywhere along its height.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TimelineGeom {
     pub width: f64,
@@ -180,6 +185,25 @@ impl TimelineGeom {
         } else {
             0.0
         }
+    }
+
+    /// Montage time at x, kept inside the montage.
+    pub fn time_at(&self, x: f64) -> f64 {
+        self.t(x).clamp(0.0, self.total())
+    }
+
+    /// Where the play line is drawn for montage time `pos`.
+    pub fn line_x(&self, pos: f64) -> f64 {
+        self.x(pos).min(self.width - PAD)
+    }
+
+    pub fn line_hit(&self, pos: f64, x: f64) -> bool {
+        self.total() > 0.0 && (x - self.line_x(pos)).abs() <= GRAB
+    }
+
+    /// Mouse cursor to show at (x, y) with the play line at `pos`.
+    pub fn cursor(&self, pos: f64, x: f64, y: f64) -> Option<&'static str> {
+        (self.line_hit(pos, x) || self.sound_hit(x, y).is_some()).then_some("grab")
     }
 
     /// (x, width) per clip.
@@ -399,7 +423,7 @@ mod tests {
         TimelineGeom {
             width: 1028.0,
             clips: vec![("a".into(), 10.0), ("b".into(), 30.0)],
-            sounds: vec![vec![SoundBox { label: "m".into(), at: 5.0, seconds: 10.0 }], vec![]],
+            sounds: vec![vec![SoundBox { label: "m".into(), at: 5.0, seconds: 10.0, linked: false }], vec![]],
             lanes: 2,
         }
     }
@@ -416,6 +440,21 @@ mod tests {
         assert_eq!(g.sound_hit(g.x(16.0), 45.0), None);
         assert_eq!(g.sound_hit(g.x(6.0), 65.0), None);
         assert!((g.t(g.x(12.5)) - 12.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn timeline_play_line() {
+        let g = timeline();
+        let x = g.line_x(20.0);
+        assert_eq!(x, g.x(20.0));
+        assert!(g.line_hit(20.0, x - 6.0) && g.line_hit(20.0, x + 6.0) && !g.line_hit(20.0, x + 7.0));
+        // the whole height of the line is grabbable, and it comes before a sound item under it
+        assert_eq!((g.cursor(20.0, x, 10.0), g.cursor(20.0, x, 65.0), g.cursor(20.0, x + 30.0, 65.0)), (Some("grab"), Some("grab"), None));
+        assert_eq!(g.cursor(20.0, g.x(6.0), 45.0), Some("grab"));
+        // past the end of the montage the line stays on the bar, and times stay inside the montage
+        assert_eq!(g.line_x(55.0), 1014.0);
+        assert_eq!((g.time_at(-50.0), g.time_at(5000.0), g.time_at(g.x(12.5))), (0.0, 40.0, 12.5));
+        assert!(!TimelineGeom::default().line_hit(0.0, PAD));
     }
 
     #[test]

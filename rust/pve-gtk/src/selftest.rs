@@ -3,7 +3,8 @@
 //! It expects two clips: the first without sound, the second with. Gestures are
 //! simulated by calling the widgets' own press/drag/release code with pixel
 //! coordinates, so hit-testing and geometry are exercised; real pointer events
-//! are not. Writes PREFIX.pve (a project) and PREFIX.mp4 (an export).
+//! are not. Writes PREFIX.pve (a project), PREFIX.mp4 (an export) and
+//! PREFIX-bars.png (the trim bar and timeline as drawn).
 
 use std::process::Command;
 use std::rc::Rc;
@@ -14,11 +15,11 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use pve_core::model::Crop;
 use pve_core::planner::Kind;
-use pve_core::session::Shape;
+use pve_core::session::{Shape, SoundRef};
 use pve_core::time::{int, r, to_f64};
 
 use crate::app::App;
-use crate::geom::{TimelineGeom, TrimGeom, TrimHit};
+use crate::geom::{SoundBox, TimelineGeom, TrimGeom, TrimHit};
 
 pub static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
@@ -41,6 +42,22 @@ impl Report {
             println!("FAIL {name}  {detail:?}");
         }
     }
+}
+
+/// Save a picture of the trim bar and the timeline, drawn by their own code. Works while the window is hidden.
+fn bars_picture(a: &App, path: &str) -> Option<()> {
+    use gtk::cairo;
+    let (trim, tl) = (&a.trim.area, &a.timeline.area);
+    let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, trim.width().max(1), trim.height() + tl.height() + 18).ok()?;
+    let cr = cairo::Context::new(&surface).ok()?;
+    cr.set_source_rgb(0.14, 0.14, 0.14);
+    cr.paint().ok()?;
+    cr.translate(0.0, 6.0);
+    a.trim.paint(&cr);
+    cr.translate(0.0, trim.height() as f64 + 6.0);
+    a.timeline.paint(&cr);
+    drop(cr);
+    surface.write_to_png(&mut std::fs::File::create(path).ok()?).ok()
 }
 
 const NONE: gdk::ModifierType = gdk::ModifierType::empty();
@@ -203,6 +220,91 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     let ok = { let st = a.st.borrow(); st.s.clips().len() == 2 && st.s.clips()[1].end == int(17) };
     rep.check("undo split", ok, "");
 
+    // --- montage: drag the play line across the clips (clip 1 is 5-15, clip 2 is 7-17)
+    let spans_of = |a: &App| -> Vec<(pve_core::time::R, pve_core::time::R)> { a.st.borrow().s.clips().iter().map(|c| (c.start, c.end)).collect() };
+    let state = |a: &App| (a.st.borrow().s.selected, a.st.borrow().pos, a.timeline.pos());
+    let before = spans_of(a);
+    let tg = a.timeline.geom();
+    let lx = tg.line_x(a.timeline.pos());
+    let low = TimelineGeom::lane_y(1) + 5.0;
+    let cursors = (tg.cursor(a.timeline.pos(), lx, TimelineGeom::CLIP_Y + 5.0), tg.cursor(a.timeline.pos(), lx, low), tg.cursor(a.timeline.pos(), lx + 30.0, low));
+    rep.check("montage play line is grabbable along its whole height", cursors == (Some("grab"), Some("grab"), None), cursors);
+    a.timeline.press(lx + 3.0, low);
+    a.timeline.drag(tg.x(4.0) - lx, 0.0);
+    sleep(500).await;
+    let (sel, pos, line) = state(a);
+    rep.check("dragging the play line back enters clip 1", sel == Some(0) && (pos - 9.0).abs() < 0.05 && (line - 4.0).abs() < 0.05, (sel, pos, line));
+    a.timeline.drag(tg.x(16.0) - lx, 0.0);
+    a.timeline.release();
+    sleep(500).await;
+    let (sel, pos, line) = state(a);
+    rep.check("dragging it on enters clip 2", sel == Some(1) && (pos - 13.0).abs() < 0.05 && (line - 16.0).abs() < 0.05, (sel, pos, line));
+    a.timeline.press(tg.line_x(a.timeline.pos()), TimelineGeom::CLIP_Y + 5.0);
+    a.timeline.drag(5000.0, 0.0);
+    a.timeline.release();
+    sleep(400).await;
+    let (sel, pos, _) = state(a);
+    rep.check("the play line stops at the end of the montage", sel == Some(1) && (pos - 17.0).abs() < 0.05, (sel, pos));
+    rep.check("scrubbing the montage edits nothing", spans_of(a) == before, "");
+    a.timeline.press(tg.x(4.0), TimelineGeom::CLIP_Y + 5.0);
+    a.timeline.release();
+    sleep(400).await;
+    a.timeline.press(tg.line_x(a.timeline.pos()) + 2.0, TimelineGeom::CLIP_Y + 5.0);
+    a.timeline.release();
+    sleep(300).await;
+    let (sel, pos, _) = state(a);
+    rep.check("pressing the line without dragging is a click on the clip under it", sel == Some(0) && (pos - 9.0).abs() < 0.2, (sel, pos));
+
+    // --- clip 2's own sound shows in lane 1, joined to its clip
+    let own = vec![SoundBox { label: "clip2".into(), at: 10.0, seconds: 10.0, linked: true }];
+    let lanes = a.timeline.geom().sounds;
+    rep.check("clip 2's own sound is shown in lane 1 under its clip", lanes == vec![own.clone(), vec![]] && a.st.borrow().s.lanes()[0].items.is_empty(), &lanes);
+    let lane1_y = TimelineGeom::lane_y(0) + 5.0;
+    let x15 = a.timeline.geom().x(15.0);
+    a.timeline.press(x15, lane1_y);
+    a.timeline.release();
+    sleep(400).await;
+    let got = (a.st.borrow().s.sound_ref(), a.st.borrow().s.selected, a.timeline.shown().0, a.in_entry.text().to_string(), a.out_entry.text().to_string());
+    rep.check("pressing it selects it as a sound", got == (Some(SoundRef::Own(1)), Some(1), Some((0, 0)), "0:07.000".into(), "0:17.000".into()), &got);
+    a.volume.set_value(50.0);
+    sleep(300).await;
+    let got = (a.st.borrow().s.clips()[1].gain_db, a.st.borrow().s.sound_ref());
+    rep.check("its volume is the clip's volume, and it stays linked", (got.0 + 6.02).abs() < 0.01 && got.1 == Some(SoundRef::Own(1)), got);
+    a.key(gdk::Key::z, CTRL);
+    sleep(300).await;
+    a.hear[0].set_active(false);
+    sleep(300).await;
+    let got = (a.timeline.shown().1, a.player.sound_on(), a.st.borrow().plan.as_ref().is_some_and(|p| !p.audio.is_empty()), a.st.borrow().s.clips()[1].audio);
+    rep.check("lane 1 can be muted for the preview only", got == (vec![true, false], Some(false), true, true), &got);
+    a.hear[0].set_active(true);
+    sleep(300).await;
+    let got = (a.timeline.shown().1, a.player.sound_on());
+    rep.check("and heard again", got == (vec![false, false], Some(true)), &got);
+    a.timeline.press(x15, lane1_y);
+    a.timeline.drag(60.0, 0.0);
+    a.timeline.release();
+    sleep(300).await;
+    let ok = {
+        let st = a.st.borrow();
+        st.s.sound_ref() == Some(SoundRef::Item(0, 0)) && !st.s.clips()[1].audio && st.s.lanes()[0].items.len() == 1 && st.s.lanes()[0].items[0].at > int(10)
+            && !a.timeline.geom().sounds[0][0].linked
+    };
+    rep.check("dragging it by itself unlinks it from the clip", ok, a.st.borrow().s.sound_ref());
+    a.key(gdk::Key::z, CTRL);
+    sleep(300).await;
+    let ok = { let st = a.st.borrow(); st.s.sound_ref() == Some(SoundRef::Own(1)) && st.s.clips()[1].audio && st.s.lanes()[0].items.is_empty() };
+    rep.check("undo links it again", ok, a.st.borrow().s.sound_ref());
+    a.key(gdk::Key::Delete, NONE);
+    sleep(300).await;
+    let ok = { let st = a.st.borrow(); !st.s.clips()[1].audio && st.s.sound().is_none() && st.s.selected == Some(1) } && a.timeline.geom().sounds == vec![vec![], vec![]];
+    rep.check("Delete removes the clip's sound", ok, a.timeline.geom().sounds);
+    a.key(gdk::Key::z, CTRL);
+    sleep(300).await;
+    a.key(gdk::Key::Escape, NONE);
+    sleep(300).await;
+    let ok = a.st.borrow().s.clips()[1].audio && a.st.borrow().s.sound().is_none() && a.timeline.geom().sounds[0] == own;
+    rep.check("undo brings it back", ok, a.timeline.geom().sounds);
+
     // --- sound lane: clip 2's sound under clip 1
     click_clip(a, 0, 1.0);
     sleep(400).await;
@@ -213,13 +315,13 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     while a.st.borrow().s.sound().is_none() && t1.elapsed() < Duration::from_secs(8) {
         sleep(100).await;
     }
-    let ok = { let st = a.st.borrow(); st.s.sound().is_some_and(|s| s.at == int(0)) && st.s.sel_audio == Some((0, 0)) };
-    rep.check("sound added at the play position", ok, a.st.borrow().s.sel_audio);
+    let ok = { let st = a.st.borrow(); st.s.sound().is_some_and(|s| s.at == int(0)) && st.s.sel_audio == Some((1, 0)) };
+    rep.check("sound added at the play position, in the lane that is free", ok, a.st.borrow().s.sel_audio);
     a.time_typed("7", "in");
     a.time_typed("17", "out");
     sleep(300).await;
     rep.check("sound item trimmed by typing", a.st.borrow().s.sound().is_some_and(|s| (s.start, s.end) == (int(7), int(17))), "");
-    rep.check("sound mode disables clip-only controls", !a.sound.is_sensitive() && a.crop.rect().is_none(), "");
+    rep.check("sound mode disables clip-only controls", !a.lock.is_sensitive() && a.crop.rect().is_none(), "");
     a.key(gdk::Key::Escape, NONE);
     sleep(400).await;
     rep.check("Escape returns to the clip", a.st.borrow().s.sound().is_none() && a.st.borrow().s.selected == Some(0), "");
@@ -229,27 +331,30 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
 
     // --- drag the sound item along the montage and to the other lane
     let tg = a.timeline.geom();
-    let lane_y = TimelineGeom::lane_y(0) + 5.0;
-    rep.check("sound item hit-testing", tg.sound_hit(tg.x(1.0), lane_y) == Some((0, 0)), tg.sound_hit(tg.x(1.0), lane_y));
+    let lane_y = TimelineGeom::lane_y(1) + 5.0; // lane 2
+    rep.check("sound item hit-testing", tg.sound_hit(tg.x(1.0), lane_y) == Some((1, 0)), tg.sound_hit(tg.x(1.0), lane_y));
     a.timeline.press(tg.x(1.0), lane_y);
     a.timeline.drag(60.0, 0.0);
     a.timeline.release();
     sleep(300).await;
-    let moved_at = to_f64(&a.st.borrow().s.lanes()[0].items[0].at);
-    rep.check("sound drag moves it in time", moved_at > 0.5 && a.st.borrow().s.sel_audio == Some((0, 0)), moved_at);
+    let moved_at = to_f64(&a.st.borrow().s.lanes()[1].items[0].at);
+    rep.check("sound drag moves it in time", moved_at > 0.5 && a.st.borrow().s.sel_audio == Some((1, 0)), moved_at);
     let tg = a.timeline.geom();
     a.timeline.press(tg.x(moved_at + 1.0), lane_y);
-    a.timeline.drag(0.0, TimelineGeom::LANE_H + TimelineGeom::LANE_GAP);
+    a.timeline.drag(0.0, -(TimelineGeom::LANE_H + TimelineGeom::LANE_GAP));
     a.timeline.release();
     sleep(300).await;
-    rep.check("sound drag changes lane", a.st.borrow().s.sel_audio == Some((1, 0)) && a.st.borrow().s.lanes()[0].items.is_empty(), a.st.borrow().s.sel_audio);
+    let ok = a.st.borrow().s.sel_audio == Some((0, 0)) && a.st.borrow().s.lanes()[1].items.is_empty() && a.timeline.shown().0 == Some((0, 1));
+    rep.check("sound drag changes lane", ok, (a.st.borrow().s.sel_audio, a.timeline.shown().0));
     a.key(gdk::Key::z, CTRL);
     a.key(gdk::Key::z, CTRL);
     sleep(400).await;
-    let ok = { let st = a.st.borrow(); st.s.lanes()[0].items.len() == 1 && st.s.lanes()[0].items[0].at == int(0) };
+    let ok = { let st = a.st.borrow(); st.s.lanes()[1].items.len() == 1 && st.s.lanes()[1].items[0].at == int(0) };
     rep.check("undo puts the sound back", ok, "");
     a.key(gdk::Key::Escape, NONE);
     sleep(300).await;
+
+    rep.check("picture of the bars saved", bars_picture(a, &format!("{out}-bars.png")).is_some(), "");
 
     // --- volume
     a.volume.set_value(50.0);
@@ -278,7 +383,7 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
         sleep(100).await;
     }
     sleep(400).await;
-    let ok = { let st = a.st.borrow(); st.s.clips().len() == 2 && st.s.lanes()[0].items.len() == 1 && st.s.clips()[0].crop_aspect == Some(r(4, 3)) && !st.s.dirty()
+    let ok = { let st = a.st.borrow(); st.s.clips().len() == 2 && st.s.lanes()[1].items.len() == 1 && st.s.clips()[0].crop_aspect == Some(r(4, 3)) && !st.s.dirty()
                 && matches!(st.s.clips()[1].crop, Some(Crop::Rect(_))) };
     rep.check("reopened project", ok, "");
 
@@ -289,11 +394,11 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     sleep(400).await;
     let (lane_path, lane_now, want) = {
         let players = a.lane_players.borrow();
-        (players[0].path.clone(), players[0].position(), 7.0 + (a.st.borrow().pos - 5.0))
+        (players[1].path.clone(), players[1].position(), 7.0 + (a.st.borrow().pos - 5.0))
     };
     rep.check("lane sound plays in step with the clip", lane_path.as_deref() == Some(files[1].as_str()) && lane_now.is_some_and(|n| (n - want).abs() < 0.3),
               (&lane_path, lane_now, want));
-    rep.check("second lane's player was never started", !a.lane_players.borrow()[1].started(), "");
+    rep.check("lane 1 holds only clip 2's own sound, so its player was never started", !a.lane_players.borrow()[0].started(), "");
     let t1 = Instant::now();
     while a.st.borrow().s.selected == Some(0) && t1.elapsed() < Duration::from_secs(6) {
         sleep(50).await;
@@ -303,7 +408,7 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     rep.check("playback carried on into clip 2", state.0 == Some(1) && state.1 >= 7.0, state);
     a.player.set_playing(false);
     sleep(300).await;
-    rep.check("lane pauses with the clip", a.lane_players.borrow()[0].is_paused(), "");
+    rep.check("lane pauses with the clip", a.lane_players.borrow()[1].is_paused(), "");
 
     // --- export through the window
     let export = format!("{out}.mp4");

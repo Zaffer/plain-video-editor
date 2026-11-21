@@ -19,7 +19,7 @@ from .. import ffmpeg_backend  # noqa: E402
 from ..model import ProjectError, Rect  # noqa: E402
 from ..planner import ExportPlan, PlanError  # noqa: E402
 from ..probe import ProbeError, probe  # noqa: E402
-from ..session import LANES, MIN_GAIN_DB, Session  # noqa: E402
+from ..session import LANES, MIN_GAIN_DB, OWN, Session  # noqa: E402
 from .player import LanePlayer, Player  # noqa: E402
 from .widgets import CropOverlay, Timeline, TrimBar  # noqa: E402
 
@@ -166,11 +166,18 @@ class Window(Gtk.ApplicationWindow):
         bar.append(self.len_lbl)
 
         bar.append(Gtk.Box(hexpand=True))
-        self.sound = Gtk.ToggleButton(label="Sound", tooltip_text="Keep this clip's own sound")
-        self.sound.connect("toggled", self._sound_toggled)
-        bar.append(self.sound)
+        bar.append(Gtk.Label(label="Sound"))
+        hear = Gtk.Box(css_classes=["linked"])
+        self.hear = []  # per lane: pressed = heard in the preview
+        for n in range(LANES):
+            b = Gtk.ToggleButton(label=str(n + 1), active=True,
+                                 tooltip_text=f"Hear sound lane {n + 1} in the preview. This does not change the export.")
+            b.connect("toggled", self._hear_toggled)
+            hear.append(b)
+            self.hear.append(b)
+        bar.append(hear)
         self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 200, 1)
-        self.volume.set_size_request(110, -1)
+        self.volume.set_size_request(80, -1)
         self.volume.set_draw_value(False)
         self.volume.add_mark(100, Gtk.PositionType.BOTTOM, None)
         self.volume.set_tooltip_text("Volume of the selected clip or sound")
@@ -201,7 +208,8 @@ class Window(Gtk.ApplicationWindow):
 
         self.trim = TrimBar(self._on_scrub, self._on_trim)
         root.append(self.trim)
-        self.timeline = Timeline(LANES, self._on_clip_click, self._on_clip_move, self._on_sound_press, self._on_sound_move)
+        self.timeline = Timeline(LANES, self._on_clip_click, self._on_clip_move, self._on_sound_press, self._on_sound_move,
+                                 self._on_montage_scrub)
         root.append(self.timeline)
 
         foot = Gtk.Box(spacing=10, margin_start=12, margin_end=12, margin_top=2, margin_bottom=8)
@@ -218,8 +226,8 @@ class Window(Gtk.ApplicationWindow):
         foot.append(self.exact)
 
         self._entries = [self.pos_entry, self.in_entry, self.out_entry]
-        self._needs_target = [self.play_btn, self.trim, self.timeline, self.volume, *self._entries]
-        self._needs_clip = [self.sound, shapes, self.lock, self.exact, self.add_sound_btn]
+        self._needs_target = [self.play_btn, self.trim, self.timeline, self.volume, hear, *self._entries]
+        self._needs_clip = [shapes, self.lock, self.exact, self.add_sound_btn]
 
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -313,20 +321,20 @@ class Window(Gtk.ApplicationWindow):
             self.crop.update(s.display_size(), c.crop if isinstance(c.crop, Rect) else None,
                              float(c.crop_aspect) if c.crop_aspect else None)
             self.shape_btns[s.shape() if s.shape() in self.shape_btns else "free"].set_active(True)
-            has_sound = s.info().audio is not None
-            self.sound.set_sensitive(has_sound)
-            self.sound.set_active(c.audio and has_sound)
-            self.player.set_sound(c.audio and has_sound, c.gain_db)
+            self.player.set_sound(s.own_sound(s.selected) is not None and self.hears(0), c.gain_db)
         else:
             self.crop.update((0.0, 0.0), None, None)
             if s.sound is not None:
-                self.player.set_sound(True, s.sound.gain_db)
+                self.player.set_sound(self.hears(s.sound_lane), s.sound.gain_db)
 
+        shown = [s.lane_items(n) for n in range(LANES)]
+        ref = s.sound_ref
         self.timeline.update(
             [(Path(s.path(i)).stem, float(k.duration)) for i, k in enumerate(s.clips)], s.selected,
-            [[(Path(s.project.media[it.media]).stem, float(it.at), float(it.end - it.start)) for it in lane.items]
-             for lane in s.lanes],
-            s.sel_audio, float(self.montage_pos()))
+            [[(Path(s.project.media[it.media]).stem, float(it.at), float(it.end - it.start), linked) for _, it, linked in lane]
+             for lane in shown],
+            next(((n, i) for n, lane in enumerate(shown) for i, item in enumerate(lane) if item[0] == ref), None),
+            float(self.montage_pos()), [not self.hears(n) for n in range(LANES)])
         self._show_time()
         name = Path(s.file).stem if s.file else None
         self.set_title(f"{'• ' if s.dirty and s.clips else ''}{name} — {APP_NAME}" if name else APP_NAME)
@@ -380,7 +388,7 @@ class Window(Gtk.ApplicationWindow):
         active = s.clip is not None and s.sound is None and self.player.playing and not self._detached
         at = self.montage_pos() if active else None
         for n, lane_player in enumerate(self.lane_players):
-            hit = s.sound_at(n, at) if active else None
+            hit = s.sound_at(n, at) if active and self.hears(n) else None
             if hit:
                 item, source_time = hit
                 lane_player.sync(s.project.media[item.media], float(source_time), s.lanes[n].gain_db + item.gain_db)
@@ -415,7 +423,7 @@ class Window(Gtk.ApplicationWindow):
 
     def _back_to_clips(self):
         if self.s.sound is not None:
-            self.s.sel_audio = None
+            self.s.clear_sound()
             self.pos = self._clip_pos
             self._show_target()
 
@@ -468,6 +476,19 @@ class Window(Gtk.ApplicationWindow):
         self.player.set_playing(False)
         self._seek(t, exact=final)  # keyframes while dragging, the exact frame on release
 
+    def _on_montage_scrub(self, t: float, final: bool):
+        """The play line on the montage is dragged: move through the clips."""
+        s = self.s
+        if not s.clips:
+            return
+        self._dragging = not final
+        self.player.set_playing(False)
+        i, source_time = s.locate(floor_us(t))
+        if s.sound is not None or i != s.selected:
+            self.select(i, float(source_time))
+        else:
+            self._seek(float(source_time), exact=final)
+
     def _cut_frame(self, which: str) -> float:
         """The frame to show for a cut point: the first frame kept, or the last frame kept."""
         t = self.s.target
@@ -510,16 +531,20 @@ class Window(Gtk.ApplicationWindow):
             self._gesture = False
             return
         self._begin_gesture()
-        self.s.sel_audio = None
+        self.s.clear_sound()
         self.s.move(src, dst)
         self.refresh()
 
     def _on_sound_press(self, lane: int, i: int):
-        if self.s.sel_audio == (lane, i):
+        s = self.s
+        ref = s.lane_items(lane)[i][0]
+        if s.sound_ref == ref:
             return
-        if self.s.sound is None:
+        if ref[0] == OWN and ref[1] != s.selected:
+            self._clip_pos = float(s.clips[ref[1]].start)  # another clip's own sound: Escape goes back to that clip
+        elif s.sound is None:
             self._clip_pos = self.pos
-        self.s.select_sound(lane, i)
+        s.select_sound(ref)
         self.pos = float(self.s.sound.start)
         self._load()
         self.refresh()
@@ -538,12 +563,13 @@ class Window(Gtk.ApplicationWindow):
         self.s.set_shape(value)
         self.refresh()
 
-    def _sound_toggled(self, button):
-        if self._syncing or self.s.clip is None:
-            return
-        self.s.checkpoint()
-        self.s.clip.audio = button.get_active()
+    def hears(self, lane: int) -> bool:
+        """Whether a sound lane is heard in the preview. The export always has every lane."""
+        return self.hear[lane].get_active()
+
+    def _hear_toggled(self, _button):
         self.refresh()
+        self._sync_lanes()
 
     def _volume_changed(self, scale):
         if self._syncing or self.s.target is None:
