@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "media": {
+    "clip1": {"path": "../clip1.mp4"},
+    "clip2": {"path": "../clip2.mp4"}
+  },
+  "clips": [
+    {"media": "clip1", "in": 5, "out": 15, "crop": {"aspect": "4:3"}},
+    {"media": "clip2", "in": 7, "out": 17, "crop": {"aspect": "4:3"}}
+  ],
+  "audio_lanes": [
+    {"items": [{"media": "clip2", "in": 7, "out": 17, "at": 0}]}
+  ]
+}

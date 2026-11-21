@@ -1,0 +1,45 @@
+{
+  "container": "mov,mp4,m4a,3gp,3g2,mj2",
+  "duration": "187/6",
+  "video": {
+    "codec": "h264",
+    "profile": "Main",
+    "level": 40,
+    "width": 1080,
+    "height": 1080,
+    "sar": "9/16",
+    "rotation": 0,
+    "fps": "30",
+    "pix_fmt": "yuv420p",
+    "bit_depth": 8,
+    "primaries": "bt2020",
+    "transfer": "arib-std-b67",
+    "matrix": "bt2020nc",
+    "full_range": false,
+    "time_base": "1/90000",
+    "field_order": "progressive",
+    "codec_tag": "avc1",
+    "extradata_hash": "SHA256:e654d6383559cb423d8d909edfb3e2f05e9958d58c49c277c25631b34b27bed5"
+  },
+  "audio": {
+    "codec": "aac",
+    "profile": "LC",
+    "sample_rate": 48000,
+    "channels": 2,
+    "layout": "stereo",
+    "time_base": "1/48000",
+    "extradata_hash": "SHA256:b65f22439176f7827a0d82a66b34477888f0287450985d8e3dc836d7e32ce79b"
+  },
+  "keyframes": [
+    "0",
+    "10",
+    "20",
+    "30"
+  ],
+  "keyframe_dts": [
+    "-1/15",
+    "149/15",
+    "299/15",
+    "449/15"
+  ]
+}

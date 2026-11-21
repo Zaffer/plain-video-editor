@@ -1,0 +1,12 @@
+# build output
+/rust/target/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# media dropped in the repository root for testing (large)
+/*.mp4
+/*.MP4
+/*.mov
+/*.MOV
+/*.mkv

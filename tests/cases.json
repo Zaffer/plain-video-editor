@@ -1,0 +1,1274 @@
+[
+ {
+  "name": "montage",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "montage_zscale_tonemap",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "montage_draft",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": true,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "montage_nvenc",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": true,
+   "hw_decode": "cuda"
+  },
+  "encoder": "nvenc",
+  "error": false
+ },
+ {
+  "name": "montage_gpu_decode_only",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": true,
+   "hw_decode": "cuda"
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "montage_4k_auto_gpu",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ],
+   "output": {
+    "width": 3840,
+    "height": 2160
+   }
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": true,
+   "hw_decode": "cuda"
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "montage_4k_forced_x264",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ],
+   "output": {
+    "width": 3840,
+    "height": 2160
+   }
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": true,
+   "hw_decode": "cuda"
+  },
+  "encoder": "x264",
+  "error": false
+ },
+ {
+  "name": "trim_copy",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "trim_copy_with_sound",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "trim_copy_to_end",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 25,
+     "out": 31
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "trim_copy_from_start",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 0,
+     "out": 3
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "join_copy",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 7
+    },
+    {
+     "media": "clip1",
+     "in": 18,
+     "out": 20
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "join_copy_with_sound",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 21,
+     "out": 29
+    },
+    {
+     "media": "clip2",
+     "in": 1,
+     "out": 9
+    },
+    {
+     "media": "clip2",
+     "in": 25,
+     "out": 31
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "trim_exact",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "encode",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "trim_muted_copy",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "audio": false
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "hdr_keep",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 10,
+     "crop": {
+      "aspect": "1:1"
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "hdr_keep_nvenc",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 10,
+     "crop": {
+      "aspect": "1:1"
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": true,
+   "hw_decode": "cuda"
+  },
+  "encoder": "nvenc",
+  "error": false
+ },
+ {
+  "name": "hdr_draft",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 10,
+     "crop": {
+      "aspect": "1:1"
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": true,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "mixed_shapes_bars",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 7
+    },
+    {
+     "media": "clip2",
+     "in": 1,
+     "out": 3
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "crop_rect_non_square_pixels",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 0,
+     "out": 1,
+     "crop": {
+      "x": 0,
+      "y": 320,
+      "w": 540,
+      "h": 800
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "crop_rect_fractional_time",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": "1001/30000",
+     "out": 7.5,
+     "crop": {
+      "x": 101,
+      "y": 51,
+      "w": 333,
+      "h": 251
+     },
+     "crop_aspect": "4:3"
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "volume_and_lanes",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 2,
+     "out": 12,
+     "gain_db": 3.5
+    },
+    {
+     "media": "clip1",
+     "in": 0,
+     "out": 4
+    }
+   ],
+   "audio_lanes": [
+    {
+     "gain_db": -6,
+     "items": [
+      {
+       "media": "clip2",
+       "in": 20,
+       "out": 23.25,
+       "at": 1.5,
+       "gain_db": 2
+      }
+     ]
+    },
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 0,
+       "out": 30,
+       "at": 9
+      },
+      {
+       "media": "clip2",
+       "in": 5,
+       "out": 6,
+       "at": 99
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "output_size_override",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 1,
+     "out": 2
+    }
+   ],
+   "audio_lanes": [],
+   "output": {
+    "width": 1280,
+    "height": 720
+   }
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": false
+ },
+ {
+  "name": "copy_refused_when_cropped",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "copy",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": true
+ },
+ {
+  "name": "out_point_past_end",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 99
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": true
+ },
+ {
+  "name": "lane_item_without_sound",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 0,
+     "out": 5
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip1",
+       "in": 0,
+       "out": 5
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": true
+ },
+ {
+  "name": "crop_outside_frame",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip2",
+     "in": 0,
+     "out": 1,
+     "crop": {
+      "x": 800,
+      "y": 0,
+      "w": 400,
+      "h": 400
+     }
+    }
+   ],
+   "audio_lanes": []
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "auto",
+  "error": true
+ },
+ {
+  "name": "nvenc_forced_but_missing",
+  "project": {
+   "version": 1,
+   "media": {
+    "clip1": {
+     "path": "clip1.mp4"
+    },
+    "clip2": {
+     "path": "clip2.mp4"
+    }
+   },
+   "clips": [
+    {
+     "media": "clip1",
+     "in": 5,
+     "out": 15,
+     "crop": {
+      "aspect": "4:3"
+     }
+    },
+    {
+     "media": "clip2",
+     "in": 7,
+     "out": 17,
+     "crop": {
+      "aspect": "4:3"
+     }
+    }
+   ],
+   "audio_lanes": [
+    {
+     "items": [
+      {
+       "media": "clip2",
+       "in": 7,
+       "out": 17,
+       "at": 0
+      }
+     ]
+    }
+   ]
+  },
+  "mode": "auto",
+  "draft": false,
+  "caps": {
+   "filters": [
+    "zscale",
+    "libplacebo",
+    "tonemap"
+   ],
+   "nvenc": false,
+   "hw_decode": null
+  },
+  "encoder": "nvenc",
+  "error": true
+ }
+]
