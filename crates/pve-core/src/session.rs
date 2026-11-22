@@ -246,6 +246,15 @@ impl Session {
         }
     }
 
+    /// Whether the target makes any sound: a clip without sound of its own does not.
+    pub fn target_has_sound(&self) -> bool {
+        match self.target() {
+            Some(Target::Clip(i)) => self.own_sound(i).is_some(),
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     pub fn target_info(&self) -> Option<&MediaInfo> {
         self.infos.get(self.target_span()?.0)
     }
@@ -511,8 +520,9 @@ impl Session {
         self.lane_items(lane).iter().any(|(_, o, _)| o.at < a1 && a0 < o.at + o.duration())
     }
 
-    /// Add a file's sound at montage time `at`, in the first lane where it overlaps nothing (else the last lane).
-    pub fn add_sound(&mut self, path: &str, info: MediaInfo, at: R) -> Result<(usize, usize), String> {
+    /// Add a file's sound at montage time `at`: in `lane` if one is given, otherwise in the
+    /// first lane where it overlaps nothing (else the last lane).
+    pub fn add_sound(&mut self, path: &str, info: MediaInfo, at: R, lane: Option<usize>) -> Result<(usize, usize), String> {
         if info.audio.is_none() {
             return Err("this file has no sound".into());
         }
@@ -523,7 +533,10 @@ impl Session {
         }
         let duration = self.infos[&media].duration;
         let item = AudioItem { media, start: time::zero(), end: duration, at: at.max(time::zero()), gain_db: 0.0 };
-        let lane = (0..LANES).find(|&n| !self.overlaps(n, &item.at, &duration)).unwrap_or(LANES - 1);
+        let lane = match lane {
+            Some(n) => n.min(LANES - 1),
+            None => (0..LANES).find(|&n| !self.overlaps(n, &item.at, &duration)).unwrap_or(LANES - 1),
+        };
         self.project.lanes[lane].items.push(item);
         self.sel_audio = Some((lane, self.project.lanes[lane].items.len() - 1));
         self.sel_own = false;
@@ -863,11 +876,11 @@ mod tests {
         let mut s = trimmed(); // clip 1 is montage 0-10 with no sound; clip 2 is 10-20 and its own sound shows in lane 1
         let shown: Vec<_> = s.lane_items(0).iter().map(|(r, it, linked)| (*r, it.at, it.duration(), *linked)).collect();
         assert_eq!(shown, vec![(SoundRef::Own(1), int(10), int(10), true)]);
-        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(0)), Ok((1, 0))); // would overlap it: lane 2
+        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(0), None), Ok((1, 0))); // would overlap it: lane 2
         s.set_in(int(8));
         s.set_out(int(18)); // trims the sound item, not the clip
         assert_eq!((s.sound().unwrap().start, s.sound().unwrap().end, s.clips()[1].start), (int(8), int(18), int(7)));
-        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(5)), Ok((1, 1))); // no free lane: the last one
+        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(5), None), Ok((1, 1))); // no free lane: the last one
         s.select_sound(SoundRef::Item(1, 0));
         assert_eq!(s.sound_at(1, &int(3)).map(|(_, t)| t), Some(int(11)));
         assert!(s.sound_at(1, &int(4000)).is_none());
@@ -880,7 +893,8 @@ mod tests {
         assert_eq!((s.sel_audio, s.lanes()[0].items.len()), (None, 0));
         assert!(s.undo());
         assert_eq!(s.lanes()[0].items.len(), 1);
-        assert!(s.add_sound("/media/clip1.mp4", info("clip1"), int(0)).is_err()); // clip1 has no sound
+        assert!(s.add_sound("/media/clip1.mp4", info("clip1"), int(0), None).is_err()); // clip1 has no sound
+        assert_eq!(s.add_sound("/media/clip2.mp4", info("clip2"), int(12), Some(0)), Ok((0, 1))); // a lane asked for is used, overlap or not
     }
 
     #[test]
@@ -935,7 +949,7 @@ mod tests {
     #[test]
     fn sound_under_both_clips_plans_two_sources() {
         let mut s = trimmed();
-        s.add_sound("/media/clip2.mp4", info("clip2"), int(0)).unwrap();
+        s.add_sound("/media/clip2.mp4", info("clip2"), int(0), None).unwrap();
         s.set_in(int(7));
         s.set_out(int(17));
         let p = s.plan().unwrap().unwrap();
@@ -951,7 +965,7 @@ mod tests {
         s.set_in(int(5));
         s.set_out(int(15));
         s.set_shape(&Shape::Ratio(r(4, 3)));
-        s.add_sound("/media/clip2.mp4", info("clip2"), int(2)).unwrap();
+        s.add_sound("/media/clip2.mp4", info("clip2"), int(2), None).unwrap();
         assert!(s.dirty());
         let file = "/projects/a/edit.pve";
         let stored = s.file_json(file);

@@ -7,14 +7,17 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{cairo, gdk, glib};
+use gtk::{cairo, gdk, glib, pango};
 use pve_core::model::Rect;
 
-use crate::geom::{CropGeom, CropHit, SoundBox, TimelineGeom, TrimGeom, TrimHit, KNOB, PAD};
+use crate::app::{clock, short_clock};
+use crate::geom::{CropGeom, CropHit, SoundBox, TimelineGeom, TrimGeom, TrimHit, TrimLabel, KNOB, PAD};
 
 const ACCENT: (f64, f64, f64) = (0.21, 0.52, 0.89);
 const SOUND: (f64, f64, f64) = (0.18, 0.62, 0.45);
 const PLAYHEAD: (f64, f64, f64) = (0.9, 0.2, 0.2);
+/// Half way between the clips' colour and the sounds': the link between a clip and its own sound.
+const LINK: (f64, f64, f64) = ((ACCENT.0 + SOUND.0) / 2.0, (ACCENT.1 + SOUND.1) / 2.0, (ACCENT.2 + SOUND.2) / 2.0);
 
 type Rgba = (f64, f64, f64, f64);
 
@@ -44,8 +47,23 @@ fn triangle(cr: &cairo::Context, c: Rgba, p: [(f64, f64); 3]) {
     let _ = cr.fill();
 }
 
-fn text(area: &gtk::DrawingArea, cr: &cairo::Context, s: &str, c: Rgba, x: f64, y_mid: f64, clip: Option<(f64, f64, f64, f64)>) {
+/// Text as the bars write it: a little smaller than the window's, with digits of equal width
+/// so a running time does not shiver.
+fn layout(area: &gtk::DrawingArea, s: &str) -> pango::Layout {
     let layout = area.create_pango_layout(Some(s));
+    let attrs = pango::AttrList::new();
+    attrs.insert(pango::AttrFloat::new_scale(0.9));
+    attrs.insert(pango::AttrFontFeatures::new("tnum"));
+    layout.set_attributes(Some(&attrs));
+    layout
+}
+
+fn text_width(area: &gtk::DrawingArea, s: &str) -> f64 {
+    layout(area, s).pixel_size().0 as f64
+}
+
+fn text(area: &gtk::DrawingArea, cr: &cairo::Context, s: &str, c: Rgba, x: f64, y_mid: f64, clip: Option<(f64, f64, f64, f64)>) {
+    let layout = layout(area, s);
     let _ = cr.save();
     if let Some((cx, cy, cw, ch)) = clip {
         cr.rectangle(cx, cy, cw.max(0.0), ch.max(0.0));
@@ -74,10 +92,19 @@ struct TrimState {
     snapped: Option<(f64, f64)>,
     /// Identifies what is shown, to reset the zoom when it changes.
     key: Option<(String, bool)>,
+    /// The bar shows only the kept range.
+    fit: bool,
     drag: Option<TrimHit>,
+    /// A time was pressed; on release it is typed over.
+    pressed: Option<TrimLabel>,
+    /// The time being typed over: a text box covers it, so it is not drawn.
+    editing: Option<TrimLabel>,
     x0: f64,
     pointer: (f64, f64),
 }
+
+/// One of the times written on the bar: which, its text, its left edge and its width.
+type Label = (TrimLabel, String, f64, f64);
 
 /// The scroll wheel zooms around the pointer; Shift+scroll pans.
 #[derive(Clone)]
@@ -88,21 +115,35 @@ pub struct TrimBar {
     pub on_scrub: Rc<Callback<(f64, bool)>>,
     /// (which, time, final): the in or out point is dragged.
     pub on_trim: Rc<Callback<(TrimHit, f64, bool)>>,
+    /// (which, left edge, width): one of the times is clicked, to type over it.
+    pub on_edit: Rc<Callback<(TrimLabel, f64, f64)>>,
+    /// The wheel was turned while the bar showed only the kept range: it no longer does.
+    pub on_unfit: Rc<Callback<()>>,
 }
 
 impl TrimBar {
     pub fn new() -> TrimBar {
-        let area = gtk::DrawingArea::builder().hexpand(true).content_height(66).build();
+        let area = gtk::DrawingArea::builder().hexpand(true).content_height(TrimGeom::HEIGHT as i32).build();
         let st = Rc::new(RefCell::new(TrimState {
-            geom: TrimGeom { width: 0.0, height: 66.0, duration: 0.0, start: 0.0, end: 0.0, pos: 0.0, view: (0.0, 0.0) },
+            geom: TrimGeom { width: 0.0, height: TrimGeom::HEIGHT, duration: 0.0, start: 0.0, end: 0.0, pos: 0.0, view: (0.0, 0.0) },
             keyframes: Rc::new(Vec::new()),
             snapped: None,
             key: None,
+            fit: false,
             drag: None,
+            pressed: None,
+            editing: None,
             x0: 0.0,
             pointer: (0.0, 0.0),
         }));
-        let bar = TrimBar { area, st, on_scrub: Rc::new(RefCell::new(None)), on_trim: Rc::new(RefCell::new(None)) };
+        let bar = TrimBar {
+            area,
+            st,
+            on_scrub: Rc::new(RefCell::new(None)),
+            on_trim: Rc::new(RefCell::new(None)),
+            on_edit: Rc::new(RefCell::new(None)),
+            on_unfit: Rc::new(RefCell::new(None)),
+        };
 
         let s = bar.st.clone();
         bar.area.set_draw_func(move |area, cr, w, h| {
@@ -115,15 +156,13 @@ impl TrimBar {
         let drag = gtk::GestureDrag::new();
         let b = bar.clone();
         drag.connect_drag_begin(move |_, x, y| {
-            let hit = {
+            let label = b.label_at(x, y);
+            {
                 let mut st = b.st.borrow_mut();
                 st.geom.width = b.area.width() as f64;
                 st.x0 = x;
-                st.drag = st.geom.hit(x, y);
-                st.drag
-            };
-            if hit == Some(TrimHit::Play) {
-                b.area.set_cursor_from_name(Some("grabbing"));
+                st.pressed = label;
+                st.drag = if label.is_some() { None } else { st.geom.hit(x, y) };
             }
             b.moved(x, false);
         });
@@ -136,6 +175,10 @@ impl TrimBar {
         drag.connect_drag_end(move |_, dx, _| {
             let x = b.st.borrow().x0 + dx;
             b.moved(x, true);
+            let pressed = b.st.borrow_mut().pressed.take();
+            if let Some(which) = pressed.filter(|_| dx.abs() < 4.0) {
+                b.edit(which);
+            }
         });
         bar.area.add_controller(drag);
 
@@ -172,16 +215,83 @@ impl TrimBar {
             st.geom.pos = pos;
             st.keyframes = keyframes;
             st.snapped = snapped;
+            // While a knob is being dragged the bar keeps still under it; it fits again on release.
+            if st.fit && st.drag.is_none() && end > start {
+                st.geom.view = (start, end);
+            }
         }
         self.area.queue_draw();
     }
 
+    /// Show only the kept range (true), or the whole source.
+    pub fn set_fit(&self, fit: bool) {
+        {
+            let mut st = self.st.borrow_mut();
+            st.fit = fit;
+            let g = &mut st.geom;
+            g.view = if fit && g.end > g.start { (g.start, g.end) } else { (0.0, g.duration) };
+        }
+        self.area.queue_draw();
+    }
+
+    pub fn fit(&self) -> bool {
+        self.st.borrow().fit
+    }
+
+    /// The span "play this clip" covers: what the bar stands for. The whole source, or the
+    /// kept range when the bar shows only that.
+    pub fn span(&self) -> (f64, f64) {
+        let st = self.st.borrow();
+        if st.fit {
+            (st.geom.start, st.geom.end)
+        } else {
+            (0.0, st.geom.duration)
+        }
+    }
+
+    /// The times written on the bar now, and where.
+    fn labels(&self) -> Vec<Label> {
+        let st = self.st.borrow();
+        let mut g = st.geom.clone();
+        g.width = self.area.width() as f64;
+        trim_labels(&self.area, &g)
+    }
+
+    fn label_at(&self, x: f64, y: f64) -> Option<TrimLabel> {
+        let h = self.area.height() as f64;
+        self.labels().into_iter().find(|(which, _, lx, lw)| {
+            let band = if *which == TrimLabel::Pos { y < TrimGeom::TOP } else { y >= h - TrimGeom::BOTTOM };
+            band && (lx - 2.0..=lx + lw + 2.0).contains(&x)
+        }).map(|l| l.0)
+    }
+
+    /// Ask for one of the times to be typed over (a click on it does this).
+    pub fn edit(&self, which: TrimLabel) {
+        if let Some((_, _, x, w)) = self.labels().into_iter().find(|l| l.0 == which) {
+            call(&self.on_edit, (which, x, w));
+        }
+    }
+
+    /// The time that a text box is covering, if any.
+    pub fn set_editing(&self, which: Option<TrimLabel>) {
+        self.st.borrow_mut().editing = which;
+        self.area.queue_draw();
+    }
+
+    /// For tests: the times as written: (play position, in, out, length).
+    pub fn texts(&self) -> (String, String, String, String) {
+        let find = |which| self.labels().into_iter().find(|l| l.0 == which).map(|l| l.1).unwrap_or_default();
+        let g = self.st.borrow().geom.clone();
+        (find(TrimLabel::Pos), find(TrimLabel::In), find(TrimLabel::Out), length_text(&g))
+    }
+
     /// Move the play position. `follow` scrolls a zoomed view to keep it visible (during playback).
+    /// A bar that shows only the kept range stays on it.
     pub fn set_pos(&self, pos: f64, follow: bool) {
         {
             let mut st = self.st.borrow_mut();
             st.geom.pos = pos;
-            if follow && st.drag.is_none() {
+            if follow && st.drag.is_none() && !st.fit {
                 st.geom.follow();
             }
         }
@@ -196,7 +306,7 @@ impl TrimBar {
     }
 
     pub fn scroll(&self, dy: f64, shift: bool) {
-        {
+        let unfit = {
             let mut st = self.st.borrow_mut();
             st.geom.width = self.area.width() as f64;
             let x = st.pointer.0;
@@ -205,11 +315,17 @@ impl TrimBar {
             } else {
                 st.geom.zoom(x, dy);
             }
+            std::mem::take(&mut st.fit)
+        };
+        if unfit {
+            call(&self.on_unfit, ());
         }
         self.area.queue_draw();
     }
 
     fn update_cursor(&self) {
+        let pointer = self.st.borrow().pointer;
+        let over_time = self.label_at(pointer.0, pointer.1).is_some();
         let name = {
             let mut st = self.st.borrow_mut();
             if st.drag.is_some() {
@@ -217,7 +333,7 @@ impl TrimBar {
             }
             st.geom.width = self.area.width() as f64;
             st.geom.height = self.area.height() as f64;
-            st.geom.cursor(st.pointer.0, st.pointer.1)
+            if over_time { Some("text") } else { st.geom.cursor(pointer.0, pointer.1) }
         };
         self.area.set_cursor_from_name(name);
     }
@@ -268,6 +384,35 @@ impl TrimBar {
     }
 }
 
+fn length_text(g: &TrimGeom) -> String {
+    format!("{:.3} s", g.end - g.start)
+}
+
+/// The three times and where they go. A cut point outside a zoomed view has its time at
+/// the edge it lies beyond, with an arrow.
+fn trim_labels(area: &gtk::DrawingArea, g: &TrimGeom) -> Vec<Label> {
+    let mut out = Vec::new();
+    if g.duration <= 0.0 {
+        return out;
+    }
+    let pos = clock(g.line_pos());
+    let w = text_width(area, &pos);
+    if let Some(x) = g.pos_label_x(w) {
+        out.push((TrimLabel::Pos, pos, x, w));
+    }
+    let start = if g.start < g.view.0 { format!("◂ {}", clock(g.start)) } else { clock(g.start) };
+    let end = if g.end > g.view.1 { format!("{} ▸", clock(g.end)) } else { clock(g.end) };
+    let (w_in, w_out) = (text_width(area, &start), text_width(area, &end));
+    let (x_in, x_out) = g.cut_label_x(w_in, w_out);
+    if let Some(x) = x_in {
+        out.push((TrimLabel::In, start, x, w_in));
+    }
+    if let Some(x) = x_out {
+        out.push((TrimLabel::Out, end, x, w_out));
+    }
+    out
+}
+
 fn draw_trim(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TrimState) {
     let g = &st.geom;
     if g.duration <= 0.0 {
@@ -283,16 +428,36 @@ fn draw_trim(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TrimState) {
         (xa, xb - xa)
     };
     fill(cr, fg(area, 0.12), left, top, right - left, bot - top); // the source
+    // the kept range has the colour of what is being trimmed: a clip, or a sound
+    let kind = if st.key.as_ref().is_some_and(|(_, clip)| !clip) { SOUND } else { ACCENT };
     if let Some((s0, s1)) = st.snapped {
         // what a lossless export would include beyond the kept range
         for (a, b) in [(s0, g.start), (g.end, s1)] {
             let (x, cw) = span(a, b);
-            fill(cr, with(ACCENT, 0.28), x, top, cw, bot - top);
+            fill(cr, with(kind, 0.28), x, top, cw, bot - top);
         }
     }
     let (x, cw) = span(g.start, g.end);
     if cw > -1.0 {
-        fill(cr, with(ACCENT, 0.75), x, top, cw.max(1.0), bot - top); // kept range
+        fill(cr, with(kind, 0.75), x, top, cw.max(1.0), bot - top); // kept range
+    }
+    // read-only times, inside the bar: the length of the kept range in the middle of it,
+    // and the length of the source where the source ends
+    let mid = (top + bot) / 2.0;
+    let length = length_text(g);
+    let lw = text_width(area, &length);
+    let length_end = if lw + 12.0 <= cw {
+        text(area, cr, &length, (1.0, 1.0, 1.0, 0.95), x + (cw - lw) / 2.0, mid, None);
+        x + (cw + lw) / 2.0
+    } else {
+        left
+    };
+    if v1 >= g.duration {
+        let total = clock(g.duration);
+        let tx = right - 6.0 - text_width(area, &total);
+        if tx >= length_end + 12.0 {
+            text(area, cr, &total, fg(area, 0.65), tx, mid, None);
+        }
     }
     // keyframe ticks, when not too dense to read
     let lo = st.keyframes.partition_point(|k| *k < v0);
@@ -315,11 +480,19 @@ fn draw_trim(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TrimState) {
         }
     }
     // play position: a line, and a triangle above pointing down at it
-    if (v0..=v1).contains(&g.pos) {
-        let x = g.x(g.pos);
+    let pos = g.line_pos();
+    if (v0..=v1).contains(&pos) {
+        let x = g.x(pos);
         let red = with(PLAYHEAD, 1.0);
         fill(cr, red, x - 1.0, 2.0 + KNOB / 2.0, 2.0, bot + 2.0 - (2.0 + KNOB / 2.0));
         triangle(cr, red, [(x - KNOB / 2.0, 2.0), (x + KNOB / 2.0, 2.0), (x, 2.0 + KNOB)]);
+    }
+    // the times that can be typed over, each beside its knob
+    for (which, label, x, _) in trim_labels(area, g) {
+        if st.editing != Some(which) {
+            let y = if which == TrimLabel::Pos { 2.0 + KNOB / 2.0 } else { ky + KNOB / 2.0 };
+            text(area, cr, &label, fg(area, 0.9), x, y, None);
+        }
     }
     // when zoomed in: a thin strip showing which part of the source is visible
     if v1 - v0 < g.duration {
@@ -358,8 +531,8 @@ struct TimelineState {
 pub struct Timeline {
     pub area: gtk::DrawingArea,
     st: Rc<RefCell<TimelineState>>,
-    /// (index, fraction): a clip is clicked.
-    pub on_select: Rc<Callback<(usize, f64)>>,
+    /// A clip is clicked.
+    pub on_select: Rc<Callback<usize>>,
     /// (src, dst, final): a clip is dragged to a new position.
     pub on_move: Rc<Callback<(usize, usize, bool)>>,
     /// (lane, index): a sound item is pressed.
@@ -478,8 +651,6 @@ impl Timeline {
             if st.geom.line_hit(st.pos, x) {
                 // keep the line where it was grabbed, not under the pointer
                 st.drag = Some(TimelineDrag::Play(st.geom.line_x(st.pos) - x));
-                drop(st);
-                self.area.set_cursor_from_name(Some("grabbing"));
                 return;
             }
             match st.geom.sound_hit(x, y) {
@@ -493,9 +664,11 @@ impl Timeline {
                 }
             }
         };
+        if self.st.borrow().drag.is_some() {
+            self.area.set_cursor_from_name(Some("grabbing")); // a clip or a sound is picked up
+        }
         if let Some(hit) = sound {
             call(&self.on_sound_select, hit);
-            self.area.set_cursor_from_name(Some("grabbing"));
         }
     }
 
@@ -562,7 +735,7 @@ impl Timeline {
             (TimelineDrag::Play(_), false, Some(hit)) => call(&self.on_sound_select, hit),
             (TimelineDrag::Clip(_) | TimelineDrag::Play(_), false, _) => {
                 if let Some(hit) = click {
-                    call(&self.on_select, hit);
+                    call(&self.on_select, hit.0);
                 }
             }
             _ => {}
@@ -579,11 +752,25 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
     let g = &st.geom;
     let w = g.width;
     let clip_mode = st.sel_sound.is_none();
-    for (i, ((x, cw), (label, secs))) in g.spans().iter().zip(&g.clips).enumerate() {
+    // Every item says when it starts in the finished video, then its name. Where an item is
+    // narrow the time is what stays.
+    let named = |start: f64, name: &str, c: Rgba, x: f64, y_mid: f64, clip: (f64, f64, f64, f64)| {
+        let when = short_clock(start);
+        text(area, cr, &when, (c.0, c.1, c.2, c.3 * 0.7), x, y_mid, Some(clip));
+        text(area, cr, name, c, x + text_width(area, &when) + 6.0, y_mid, Some(clip));
+    };
+    for (i, (((x, cw), (label, _)), start)) in g.spans().iter().zip(&g.clips).zip(g.starts()).enumerate() {
         let sel = st.selected == Some(i);
         let b = (x + 1.0, TimelineGeom::CLIP_Y, (cw - 2.0).max(1.0), TimelineGeom::CLIP_H);
-        fill(cr, if sel { with(ACCENT, if clip_mode { 0.75 } else { 0.35 }) } else { fg(area, 0.14) }, b.0, b.1, b.2, b.3);
-        text(area, cr, &format!("{label}  {secs:.1}s"), if sel { (1.0, 1.0, 1.0, 1.0) } else { fg(area, 1.0) }, x + 8.0, b.1 + b.3 / 2.0, Some(b));
+        // the selected clip is full blue, the others faded; a little less faded is the clip
+        // that is waiting while one of the sounds is worked on
+        let strength = match (sel, clip_mode) {
+            (true, true) => 0.85,
+            (true, false) => 0.5,
+            (false, _) => 0.35,
+        };
+        fill(cr, with(ACCENT, strength), b.0, b.1, b.2, b.3);
+        named(start, label, if sel { (1.0, 1.0, 1.0, 1.0) } else { fg(area, 1.0) }, x + 8.0, b.1 + b.3 / 2.0, b);
     }
     let any_sound = g.sounds.iter().any(|l| !l.is_empty());
     for lane in 0..g.lanes {
@@ -591,7 +778,7 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
         fill(cr, fg(area, 0.06), PAD, y, w - 2.0 * PAD, TimelineGeom::LANE_H);
         let items: &[SoundBox] = g.sounds.get(lane).map_or(&[], |v| v.as_slice());
         if lane == 0 && !any_sound {
-            text(area, cr, "sound: press Add sound, or drop a sound file", fg(area, 0.4), PAD + 8.0, y + TimelineGeom::LANE_H / 2.0, None);
+            text(area, cr, "sound: press + at the end of a lane, or drop a sound file", fg(area, 0.4), PAD + 8.0, y + TimelineGeom::LANE_H / 2.0, None);
         }
         let quiet = st.muted.get(lane).copied().unwrap_or(false);
         for (i, s) in items.iter().enumerate() {
@@ -607,7 +794,7 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
             if s.linked {
                 // joined to the clip above it
                 let top = TimelineGeom::CLIP_Y + TimelineGeom::CLIP_H;
-                fill(cr, color, b.0 + 1.0, top, b.2 - 2.0, y - top);
+                fill(cr, with(LINK, color.3), b.0 + 1.0, top, b.2 - 2.0, y - top);
             }
             if sel {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
@@ -615,7 +802,7 @@ fn draw_timeline(area: &gtk::DrawingArea, cr: &cairo::Context, st: &TimelineStat
                 cr.rectangle(b.0 + 0.5, b.1 + 0.5, b.2 - 1.0, b.3 - 1.0);
                 let _ = cr.stroke();
             }
-            text(area, cr, &s.label, (1.0, 1.0, 1.0, if quiet { 0.45 } else { 1.0 }), b.0 + 6.0, y + TimelineGeom::LANE_H / 2.0, Some(b));
+            named(s.at, &s.label, (1.0, 1.0, 1.0, if quiet { 0.45 } else { 1.0 }), b.0 + 6.0, y + TimelineGeom::LANE_H / 2.0, b);
         }
     }
     if g.total() > 0.0 {

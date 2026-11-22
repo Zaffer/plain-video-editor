@@ -19,7 +19,7 @@ use pve_core::time::{self, r, to_f64, R};
 use pve_native::ffmpeg::{self, Capabilities, Encoder, ExportError};
 use pve_native::probe::probe;
 
-use crate::geom::{SoundBox, TrimHit};
+use crate::geom::{SoundBox, TimelineGeom, TrimHit, TrimLabel};
 use crate::player::{LanePlayer, Player, PlayerEvent};
 use crate::widgets::{CropOverlay, Timeline, TrimBar};
 
@@ -44,6 +44,17 @@ pub fn clock(t: f64) -> String {
         format!("{h}:{m:02}:{s:02}.{frac:03}")
     } else {
         format!("{m}:{s:02}.{frac:03}")
+    }
+}
+
+/// A time to the tenth of a second, for the names on the montage: "0:07.4".
+pub fn short_clock(t: f64) -> String {
+    let tenths = (t.max(0.0) * 10.0).round() as u64;
+    let (h, m, s, frac) = (tenths / 36_000, tenths % 36_000 / 600, tenths % 600 / 10, tenths % 10);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}.{frac}")
+    } else {
+        format!("{m}:{s:02}.{frac}")
     }
 }
 
@@ -107,9 +118,18 @@ fn file_name(path: &str) -> String {
     Path::new(path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_owned())
 }
 
+/// What to make of a file that is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Add {
+    /// A video becomes a clip; a file with sound only goes into a lane that is free.
+    Auto,
+    /// Its sound goes into this lane.
+    Lane(usize),
+}
+
 /// Results coming back from worker threads.
 enum Msg {
-    Added { path: String, info: Box<MediaInfo>, as_sound: bool },
+    Added { path: String, info: Box<MediaInfo>, add: Add },
     Indexed { path: String, info: Box<MediaInfo> },
     Opened { file: String, project: Box<Project>, infos: Infos },
     Note(String),
@@ -125,6 +145,10 @@ pub struct St {
     last_pos: f64,
     /// Play position to go back to after working on a sound item.
     clip_pos: f64,
+    /// Where the play line of the finished video is held, when it is not in what is selected:
+    /// clicking a clip or a sound selects it and leaves that line alone. It is let go as soon
+    /// as the play position is moved or played.
+    held: Option<R>,
     pub plan: Option<ExportPlan>,
     /// A drag is in progress and has already been checkpointed.
     gesture: bool,
@@ -132,6 +156,8 @@ pub struct St {
     dragging: bool,
     /// The preview is showing a cut point, not the play position.
     pub detached: bool,
+    /// Which play is running, or ran last: what the trim bar shows by itself (true), or the finished video.
+    pub source_play: bool,
     pub cancel: Option<Arc<AtomicBool>>,
     /// When the volume was last changed (one undo step per adjustment).
     volume_edit: Option<Instant>,
@@ -148,15 +174,21 @@ pub struct App {
     pub trim: TrimBar,
     pub timeline: Timeline,
     empty: gtk::Label,
+    /// At the start of the trim bar: play what the bar shows, by itself.
+    clip_play_btn: gtk::Button,
+    /// At its end: the bar shows only the kept range.
+    pub fit_btn: gtk::ToggleButton,
+    /// At the start of the montage: play the finished video.
     play_btn: gtk::Button,
-    pub pos_entry: gtk::Entry,
-    pub in_entry: gtk::Entry,
-    pub out_entry: gtk::Entry,
-    pub len_lbl: gtk::Label,
-    total_lbl: gtk::Label,
-    /// Per lane: pressed = heard in the preview.
-    pub hear: Vec<gtk::ToggleButton>,
-    hear_box: gtk::Box,
+    /// Per lane, at its start: pressed = not heard in the preview.
+    pub mute: Vec<gtk::ToggleButton>,
+    /// Per lane, at its end.
+    add_sound_btns: Vec<gtk::Button>,
+    /// The text box that covers a time on the trim bar while it is typed over, and which time that is.
+    pub time_entry: gtk::Entry,
+    editing: Cell<Option<TrimLabel>>,
+    /// Play position in the finished video, and its length.
+    pub montage_lbl: gtk::Label,
     pub volume: gtk::Scale,
     pub volume_lbl: gtk::Label,
     pub shape_btns: Vec<(Shape, gtk::ToggleButton)>,
@@ -167,7 +199,6 @@ pub struct App {
     cancel_btn: gtk::Button,
     pub exact: gtk::CheckButton,
     export_btn: gtk::Button,
-    add_sound_btn: gtk::Button,
     pub st: RefCell<St>,
     syncing: Cell<bool>,
     tx: Sender<Msg>,
@@ -179,26 +210,31 @@ impl App {
         let window = gtk::ApplicationWindow::builder().application(app).title(APP_NAME).default_width(1280).default_height(820).build();
         let header = gtk::HeaderBar::new();
         window.set_titlebar(Some(&header));
-        let add = gtk::Button::builder().label("Add video").tooltip_text("Add video files, or open a project (Ctrl+O). You can also drop files on the window.").build();
-        header.pack_start(&add);
-        let add_sound_btn = gtk::Button::builder().label("Add sound").tooltip_text("Put a file's sound in a lane under the clips, starting at the play position").build();
-        header.pack_start(&add_sound_btn);
-        let export_btn = gtk::Button::builder().label("Export").tooltip_text("Export (Ctrl+E)").build();
-        export_btn.add_css_class("suggested-action");
-        header.pack_end(&export_btn);
         let menu = gio::Menu::new();
         menu.append(Some("Open project…"), Some("win.open-project"));
         menu.append(Some("Save project"), Some("win.save"));
         menu.append(Some("Save project as…"), Some("win.save-as"));
         menu.append(Some("Reopen last session"), Some("win.restore"));
         header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("Project").build());
+        let export_face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        export_face.append(&gtk::Image::from_icon_name("media-eject-symbolic"));
+        export_face.append(&gtk::Label::new(Some("Export")));
+        let export_btn = gtk::Button::builder().child(&export_face).tooltip_text("Export (Ctrl+E)").build();
+        export_btn.add_css_class("suggested-action");
+        header.pack_end(&export_btn);
+
+        // The buttons at the ends of the rows are as tall as the rows, not as tall as buttons like to be.
+        let css = gtk::CssProvider::new();
+        #[allow(deprecated)] // load_from_string needs GTK 4.12
+        css.load_from_data("button.pve-row { min-height: 0; min-width: 0; padding: 0 8px; } entry.pve-time { min-height: 0; padding: 0 4px; }");
+        gtk::style_context_add_provider_for_display(&WidgetExt::display(&window), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         window.set_child(Some(&root));
 
         let player = Player::new()?;
         let crop = CropOverlay::new();
-        let empty = gtk::Label::new(Some("Drop video files here, or press Add video"));
+        let empty = gtk::Label::new(Some("Drop video files here, or press + at the end of the timeline"));
         empty.add_css_class("title-2");
         let stage = gtk::Overlay::builder().vexpand(true).build();
         stage.set_child(Some(&player.area));
@@ -208,48 +244,9 @@ impl App {
 
         let bar = gtk::Box::builder().spacing(6).margin_start(12).margin_end(12).margin_top(6).margin_bottom(2).build();
         root.append(&bar);
-        let play_btn = gtk::Button::builder().icon_name("media-playback-start-symbolic").tooltip_text("Play / pause (Space)").build();
-        bar.append(&play_btn);
-        let time_entry = |tip: &str| {
-            let e = gtk::Entry::builder().width_chars(10).max_width_chars(10).tooltip_text(format!("{tip} Type a time and press Enter.")).build();
-            e.add_css_class("numeric");
-            e
-        };
-        let dim_label = |margin: i32| {
-            let l = gtk::Label::builder().margin_start(margin).build();
-            l.add_css_class("numeric");
-            l.add_css_class("dim-label");
-            l
-        };
-        let pos_entry = time_entry("Play position.");
-        bar.append(&pos_entry);
-        let total_lbl = dim_label(0);
-        bar.append(&total_lbl);
-        bar.append(&gtk::Label::builder().label("In").margin_start(14).build());
-        let in_entry = time_entry("Where the clip starts (I sets it at the play position).");
-        bar.append(&in_entry);
-        bar.append(&gtk::Label::builder().label("Out").margin_start(6).build());
-        let out_entry = time_entry("Where the clip ends (O sets it at the play position).");
-        bar.append(&out_entry);
-        let len_lbl = dim_label(4);
-        bar.append(&len_lbl);
-        bar.append(&gtk::Box::builder().hexpand(true).build());
-        bar.append(&gtk::Label::new(Some("Sound")));
-        let hear_box = gtk::Box::builder().css_classes(["linked"]).build();
-        let hear: Vec<gtk::ToggleButton> = (1..=LANES)
-            .map(|n| {
-                let b = gtk::ToggleButton::builder()
-                    .label(n.to_string())
-                    .active(true)
-                    .tooltip_text(format!("Hear sound lane {n} in the preview. This does not change the export."))
-                    .build();
-                hear_box.append(&b);
-                b
-            })
-            .collect();
-        bar.append(&hear_box);
+        bar.append(&gtk::Label::new(Some("Volume")));
         let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 200.0, 1.0);
-        volume.set_size_request(80, -1);
+        volume.set_size_request(260, -1);
         volume.set_draw_value(false);
         volume.add_mark(100.0, gtk::PositionType::Bottom, None);
         volume.set_tooltip_text(Some("Volume of the selected clip or sound"));
@@ -257,7 +254,8 @@ impl App {
         let volume_lbl = gtk::Label::builder().width_chars(5).xalign(0.0).build();
         volume_lbl.add_css_class("numeric");
         bar.append(&volume_lbl);
-        bar.append(&gtk::Label::builder().label("Crop").margin_start(8).build());
+        bar.append(&gtk::Box::builder().hexpand(true).build());
+        bar.append(&gtk::Label::new(Some("Crop")));
         let shapes_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         shapes_box.add_css_class("linked");
         let mut shape_btns: Vec<(Shape, gtk::ToggleButton)> = Vec::new();
@@ -273,13 +271,55 @@ impl App {
         let lock = gtk::CheckButton::builder().label("All clips").active(true).tooltip_text("Use the same crop shape for every clip").build();
         bar.append(&lock);
 
-        let trim = TrimBar::new();
-        root.append(&trim.area);
-        let timeline = Timeline::new(LANES);
-        root.append(&timeline.area);
+        // Four rows, each with a button at its start and one at its end: the trim bar, the
+        // montage, and the two sound lanes. The montage and the lanes are one drawing, three rows tall.
+        let rows = gtk::Grid::builder().column_spacing(4).row_spacing(TimelineGeom::LANE_GAP as i32).margin_start(12).margin_end(12).margin_top(4).build();
+        root.append(&rows);
+        let row_button = |icon: &str, tip: &str, height: f64| {
+            let b = gtk::Button::builder().icon_name(icon).tooltip_text(tip).height_request(height as i32).valign(gtk::Align::Center).build();
+            b.add_css_class("pve-row");
+            b
+        };
+        let row_toggle = |icon: &str, tip: &str, height: f64| {
+            let b = gtk::ToggleButton::builder().icon_name(icon).tooltip_text(tip).height_request(height as i32).valign(gtk::Align::Center).build();
+            b.add_css_class("pve-row");
+            b
+        };
 
-        let foot = gtk::Box::builder().spacing(10).margin_start(12).margin_end(12).margin_top(2).margin_bottom(8).build();
+        let trim = TrimBar::new();
+        let time_entry = gtk::Entry::builder().visible(false).halign(gtk::Align::Start).width_chars(11).max_width_chars(11).build();
+        time_entry.add_css_class("numeric");
+        time_entry.add_css_class("pve-time");
+        let trim_stack = gtk::Overlay::builder().hexpand(true).child(&trim.area).build();
+        trim_stack.add_overlay(&time_entry);
+        let clip_play_btn = row_button("media-playback-start-symbolic", "Play what this bar shows, by itself, past the in and out points (Shift+Space)", TimelineGeom::CLIP_H);
+        let fit_btn = row_toggle("zoom-fit-best-symbolic", "Show only the kept part, so that it fills the bar. Press again for the whole file.", TimelineGeom::CLIP_H);
+        rows.attach(&clip_play_btn, 0, 0, 1, 1);
+        rows.attach(&trim_stack, 1, 0, 1, 1);
+        rows.attach(&fit_btn, 2, 0, 1, 1);
+
+        let timeline = Timeline::new(LANES);
+        let play_btn = row_button("media-playback-start-symbolic", "Play the finished video (Space)", TimelineGeom::CLIP_H);
+        let add = row_button("list-add-symbolic", "Add video files (Ctrl+O). You can also drop files on the window.", TimelineGeom::CLIP_H);
+        rows.attach(&play_btn, 0, 1, 1, 1);
+        rows.attach(&timeline.area, 1, 1, 1, 1 + LANES as i32);
+        rows.attach(&add, 2, 1, 1, 1);
+        let mut mute = Vec::new();
+        let mut add_sound_btns = Vec::new();
+        for n in 0..LANES {
+            let m = row_toggle("audio-volume-high-symbolic", &format!("Mute sound lane {} in the preview. This does not change the export.", n + 1), TimelineGeom::LANE_H);
+            let plus = row_button("list-add-symbolic", &format!("Add a file's sound to lane {}, starting at the play line", n + 1), TimelineGeom::LANE_H);
+            rows.attach(&m, 0, 2 + n as i32, 1, 1);
+            rows.attach(&plus, 2, 2 + n as i32, 1, 1);
+            mute.push(m);
+            add_sound_btns.push(plus);
+        }
+
+        let foot = gtk::Box::builder().spacing(10).margin_start(12).margin_end(12).margin_top(8).margin_bottom(8).build();
         root.append(&foot);
+        let montage_lbl = gtk::Label::builder().tooltip_text("Play position in the finished video, and its length").build();
+        montage_lbl.add_css_class("numeric");
+        foot.append(&montage_lbl);
         let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build();
         foot.append(&status);
         let progress = gtk::ProgressBar::builder().valign(gtk::Align::Center).visible(false).width_request(180).build();
@@ -298,14 +338,14 @@ impl App {
             trim,
             timeline,
             empty,
+            clip_play_btn,
+            fit_btn,
             play_btn,
-            pos_entry,
-            in_entry,
-            out_entry,
-            len_lbl,
-            total_lbl,
-            hear,
-            hear_box,
+            mute,
+            add_sound_btns,
+            time_entry,
+            editing: Cell::new(None),
+            montage_lbl,
             volume,
             volume_lbl,
             shape_btns,
@@ -316,16 +356,17 @@ impl App {
             cancel_btn,
             exact,
             export_btn,
-            add_sound_btn,
             st: RefCell::new(St {
                 s: Session::new(),
                 pos: 0.0,
                 last_pos: 0.0,
                 clip_pos: 0.0,
+                held: None,
                 plan: None,
                 gesture: false,
                 dragging: false,
                 detached: false,
+                source_play: false,
                 cancel: None,
                 volume_edit: None,
                 caps: Capabilities::default(),
@@ -364,14 +405,25 @@ impl App {
                 }
             }};
         }
-        let f = on!(a => a.choose_files("Add video files or open a project", false));
+        let f = on!(a => a.choose_files("Add video files or open a project", Add::Auto));
         add.connect_clicked(move |_| f());
-        let f = on!(a => a.choose_files("Add sound from files", true));
-        self.add_sound_btn.connect_clicked(move |_| f());
+        for (n, b) in self.add_sound_btns.iter().enumerate() {
+            let f = on!(a => a.choose_files(&format!("Add sound to lane {}", n + 1), Add::Lane(n)));
+            b.connect_clicked(move |_| f());
+        }
         let f = on!(a => a.export());
         self.export_btn.connect_clicked(move |_| f());
-        let f = on!(a => a.toggle_play());
+        let f = on!(a => a.play_source());
+        self.clip_play_btn.connect_clicked(move |_| f());
+        let f = on!(a => a.play_montage());
         self.play_btn.connect_clicked(move |_| f());
+        let weak = Rc::downgrade(self);
+        self.fit_btn.connect_toggled(move |b| {
+            if let Some(a) = weak.upgrade() {
+                a.stop_editing();
+                a.trim.set_fit(b.is_active());
+            }
+        });
         let f = on!(a => a.cancel_export());
         self.cancel_btn.connect_clicked(move |_| f());
 
@@ -381,7 +433,7 @@ impl App {
             action.connect_activate(move |_, _| {
                 if let Some(a) = weak.upgrade() {
                     match which {
-                        0 => a.choose_files("Open project", false),
+                        0 => a.choose_files("Open project", Add::Auto),
                         1 => a.save(false),
                         2 => a.save(true),
                         _ => a.restore(),
@@ -391,17 +443,43 @@ impl App {
             self.window.add_action(&action);
         }
 
-        for (entry, which) in [(&self.pos_entry, "pos"), (&self.in_entry, "in"), (&self.out_entry, "out")] {
-            let weak = Rc::downgrade(self);
-            entry.connect_activate(move |e| {
-                if let Some(a) = weak.upgrade() {
-                    a.time_typed(&e.text(), which);
+        // A time on the trim bar is typed over in a text box put on top of it.
+        let weak = Rc::downgrade(self);
+        *self.trim.on_edit.borrow_mut() = Some(Box::new(move |(which, x, _)| {
+            if let Some(a) = weak.upgrade() {
+                a.edit_time(which, x);
+            }
+        }));
+        let weak = Rc::downgrade(self);
+        self.time_entry.connect_activate(move |e| {
+            if let (Some(a), text) = (weak.upgrade(), e.text()) {
+                if let Some(which) = a.editing.get() {
+                    a.time_typed(&text, match which {
+                        TrimLabel::Pos => "pos",
+                        TrimLabel::In => "in",
+                        TrimLabel::Out => "out",
+                    });
                 }
-            });
-        }
-        for b in &self.hear {
+            }
+        });
+        let left = gtk::EventControllerFocus::new();
+        let weak = Rc::downgrade(self);
+        left.connect_leave(move |_| {
+            if let Some(a) = weak.upgrade() {
+                a.stop_editing();
+            }
+        });
+        self.time_entry.add_controller(left);
+        let weak = Rc::downgrade(self);
+        *self.trim.on_unfit.borrow_mut() = Some(Box::new(move |()| {
+            if let Some(a) = weak.upgrade() {
+                a.fit_btn.set_active(false);
+            }
+        }));
+        for b in &self.mute {
             let weak = Rc::downgrade(self);
-            b.connect_toggled(move |_| {
+            b.connect_toggled(move |b| {
+                b.set_icon_name(if b.is_active() { "audio-volume-muted-symbolic" } else { "audio-volume-high-symbolic" });
                 if let Some(a) = weak.upgrade() {
                     a.refresh();
                     a.sync_lanes();
@@ -455,9 +533,9 @@ impl App {
             }
         }));
         let weak = Rc::downgrade(self);
-        *self.timeline.on_select.borrow_mut() = Some(Box::new(move |(i, fraction)| {
+        *self.timeline.on_select.borrow_mut() = Some(Box::new(move |i| {
             if let Some(a) = weak.upgrade() {
-                a.on_clip_click(i, fraction);
+                a.on_clip_click(i);
             }
         }));
         let weak = Rc::downgrade(self);
@@ -528,9 +606,8 @@ impl App {
         for ev in self.player.poll() {
             match ev {
                 PlayerEvent::Time(t) => self.on_time(t),
-                PlayerEvent::Paused(paused) => {
-                    self.play_btn.set_icon_name(if paused { "media-playback-start-symbolic" } else { "media-playback-pause-symbolic" })
-                }
+                PlayerEvent::Paused(_) => self.show_playing(),
+                PlayerEvent::Ended => self.on_ended(),
             }
         }
         while let Ok(msg) = self.rx.try_recv() {
@@ -548,7 +625,7 @@ impl App {
 
     fn message(self: &Rc<Self>, msg: Msg) {
         match msg {
-            Msg::Added { path, info, as_sound } => self.added(&path, *info, as_sound),
+            Msg::Added { path, info, add } => self.added(&path, *info, add),
             Msg::Indexed { path, info } => {
                 self.st.borrow_mut().s.set_info(&path, *info);
                 self.refresh();
@@ -561,6 +638,7 @@ impl App {
                         st.s.file = None; // a restored session is not a named project
                     }
                     st.kf_cache.clear();
+                    st.held = None;
                     st.pos = st.s.clip().map_or(0.0, |c| to_f64(&c.start));
                 }
                 self.show_target();
@@ -584,26 +662,61 @@ impl App {
 
     // ------------------------------------------------------------ session -> widgets
 
-    /// The time entry being typed in, if any.
-    fn editing(&self) -> Option<&gtk::Entry> {
-        let focus = gtk::prelude::GtkWindowExt::focus(&self.window)?;
-        [&self.pos_entry, &self.in_entry, &self.out_entry].into_iter().find(|e| focus == **e || focus.is_ancestor(*e))
+    /// Put the text box over one of the times on the trim bar, holding that time, ready to type over.
+    pub fn edit_time(&self, which: TrimLabel, x: f64) {
+        let value = {
+            let st = self.st.borrow();
+            let Some((_, start, end, _)) = st.s.target_span() else { return };
+            match which {
+                TrimLabel::Pos => st.pos,
+                TrimLabel::In => to_f64(&start),
+                TrimLabel::Out => to_f64(&end),
+            }
+        };
+        self.editing.set(Some(which));
+        self.trim.set_editing(Some(which));
+        let e = &self.time_entry;
+        e.set_text(&clock(value));
+        let room = (self.trim.area.width() - e.measure(gtk::Orientation::Horizontal, -1).1).max(0);
+        e.set_margin_start(((x - 5.0) as i32).clamp(0, room));
+        e.set_valign(if which == TrimLabel::Pos { gtk::Align::Start } else { gtk::Align::End });
+        e.set_visible(true);
+        e.grab_focus();
     }
 
-    /// Where the play position falls on the montage.
+    /// For tests: the text box is up.
+    pub fn typing_time(&self) -> bool {
+        self.editing.get().is_some() && WidgetExt::is_visible(&self.time_entry)
+    }
+
+    /// Take the text box away again. What was typed is used only when Enter is pressed.
+    pub fn stop_editing(&self) {
+        if self.editing.take().is_some() {
+            self.trim.set_editing(None);
+            self.time_entry.set_visible(false);
+        }
+    }
+
+    /// Each play button shows a pause sign while its kind of play is running.
+    fn show_playing(&self) {
+        let (playing, source) = (self.player.playing(), self.st.borrow().source_play);
+        let icon = |on: bool| if on { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" };
+        self.clip_play_btn.set_icon_name(icon(playing && source));
+        self.play_btn.set_icon_name(icon(playing && !source));
+    }
+
+    /// Where the play line of the finished video is.
     pub fn montage_pos(&self) -> R {
         let st = self.st.borrow();
-        match st.s.sound() {
-            Some(sound) => sound.at + (floor_us(st.pos) - sound.start).max(time::zero()),
-            None if st.s.clip().is_some() => st.s.montage_time(&floor_us(st.pos)),
-            None => time::zero(),
+        match st.held {
+            Some(line) => line.min(st.s.total()),
+            None => line_of(&st),
         }
     }
 
     /// Redraw everything from the session and work out what an export would do.
     pub fn refresh(&self) {
         self.syncing.set(true);
-        let editing = self.editing().cloned();
         let montage = to_f64(&self.montage_pos());
         let mut st = self.st.borrow_mut();
         let st = &mut *st;
@@ -617,12 +730,20 @@ impl App {
         let has_clip = st.s.clip().is_some() && clip_mode;
 
         self.empty.set_visible(target.is_none());
-        for w in [self.play_btn.upcast_ref::<gtk::Widget>(), self.trim.area.upcast_ref(), self.timeline.area.upcast_ref(),
-                  self.volume.upcast_ref(), self.hear_box.upcast_ref(), self.pos_entry.upcast_ref(), self.in_entry.upcast_ref(),
-                  self.out_entry.upcast_ref()] {
+        for w in [self.clip_play_btn.upcast_ref::<gtk::Widget>(), self.fit_btn.upcast_ref(), self.play_btn.upcast_ref(),
+                  self.trim.area.upcast_ref(), self.timeline.area.upcast_ref()] {
             w.set_sensitive(target.is_some());
         }
-        for w in [self.shapes_box.upcast_ref::<gtk::Widget>(), self.lock.upcast_ref(), self.exact.upcast_ref(), self.add_sound_btn.upcast_ref()] {
+        for b in &self.mute {
+            b.set_sensitive(target.is_some());
+        }
+        for b in &self.add_sound_btns {
+            b.set_sensitive(target.is_some()); // sound goes under clips: there must be one
+        }
+        // a clip with no sound of its own has no volume to set
+        let has_sound = st.s.target_has_sound();
+        self.volume.set_sensitive(has_sound);
+        for w in [self.shapes_box.upcast_ref::<gtk::Widget>(), self.lock.upcast_ref(), self.exact.upcast_ref()] {
             w.set_sensitive(has_clip);
         }
         self.export_btn.set_sensitive(st.plan.is_some() && st.cancel.is_none());
@@ -646,28 +767,14 @@ impl App {
             }
             let keyframes = if clip_mode { keyframes_of(st, &media) } else { Rc::new(Vec::new()) };
             self.trim.update(Some((media, clip_mode)), to_f64(&duration), to_f64(&start), to_f64(&end), st.pos, keyframes, snapped);
-            if editing.as_ref() != Some(&self.in_entry) {
-                self.in_entry.set_text(&clock(to_f64(&start)));
-            }
-            if editing.as_ref() != Some(&self.out_entry) {
-                self.out_entry.set_text(&clock(to_f64(&end)));
-            }
-            self.len_lbl.set_text(&format!("{:.3} s", to_f64(&(end - start))));
-            self.total_lbl.set_text(&format!("/ {}", clock(to_f64(&duration))));
             let pct = gain_to_percent(gain);
             self.volume.set_value(pct);
-            self.volume_lbl.set_text(&format!("{pct:.0}%"));
-            if editing.as_ref() != Some(&self.pos_entry) {
-                self.pos_entry.set_text(&clock(st.pos));
-            }
+            self.volume_lbl.set_text(&if has_sound { format!("{pct:.0}%") } else { String::new() });
+            self.montage_lbl.set_text(&format!("{} / {}", clock(montage), clock(to_f64(&st.s.total()))));
         } else {
             self.trim.update(None, 0.0, 0.0, 0.0, 0.0, Rc::new(Vec::new()), None);
-            for e in [&self.pos_entry, &self.in_entry, &self.out_entry] {
-                e.set_text("");
-            }
-            for l in [&self.len_lbl, &self.total_lbl, &self.volume_lbl] {
-                l.set_text("");
-            }
+            self.volume_lbl.set_text("");
+            self.montage_lbl.set_text("");
         }
 
         match (st.s.selected, st.s.clip(), clip_mode) {
@@ -714,14 +821,16 @@ impl App {
         self.syncing.set(false);
     }
 
+    /// Move both play lines to the play position, and say where it is in the finished video.
     fn show_time(&self) {
-        let (pos, has) = {
+        let montage = to_f64(&self.montage_pos());
+        let (pos, total) = {
             let st = self.st.borrow();
-            (st.pos, st.s.target().is_some())
+            (st.pos, to_f64(&st.s.total()))
         };
-        if has && self.editing() != Some(&self.pos_entry) {
-            self.pos_entry.set_text(&clock(pos));
-        }
+        self.trim.set_pos(pos, self.player.playing());
+        self.timeline.set_pos(montage);
+        self.montage_lbl.set_text(&format!("{} / {}", clock(montage), clock(total)));
     }
 
     // ------------------------------------------------------------ player -> window
@@ -734,34 +843,60 @@ impl App {
                 return;
             }
             st.pos = t;
+            if self.player.playing() {
+                st.held = None;
+            }
             let crossed = self.player.playing() && st.last_pos < to_f64(&end) && to_f64(&end) <= t;
             st.last_pos = t;
-            match (crossed, st.s.target()) {
-                // Montage playback: on reaching this clip's out point, carry on into the next clip.
-                (true, Some(Target::Clip(i))) if i + 1 < st.s.clips().len() => Some(Some(i + 1)),
-                (true, _) => Some(None),
+            match (crossed, st.source_play, st.s.target()) {
+                // Playing the bar by itself runs past the out point, unless the bar shows only the kept range.
+                (true, true, _) if !self.trim.fit() => None,
+                // The finished video: on reaching this clip's out point, carry on into the next clip.
+                (true, false, Some(Target::Clip(i))) if i + 1 < st.s.clips().len() => Some(Some(i + 1)),
+                (true, _, _) => Some(None),
                 _ => None,
             }
         };
-        self.trim.set_pos(t, self.player.playing());
-        self.timeline.set_pos(to_f64(&self.montage_pos()));
         self.show_time();
         match next {
             Some(Some(i)) => self.select(i, None, true),
-            Some(None) => self.player.set_playing(false),
+            Some(None) => {
+                // The player is by now a frame or so past the out point: rest on the last frame kept.
+                self.pause();
+                self.seek(self.cut_frame(TrimHit::Out), true);
+            }
             None => {}
         }
     }
 
+    /// The player ran into the end of the file before the clip's out point was seen to pass
+    /// (a file can be a little shorter than it says): carry on as if it had passed.
+    fn on_ended(&self) {
+        if !self.player.ended() {
+            return; // playback has already moved on
+        }
+        let next = {
+            let st = self.st.borrow();
+            match st.s.target() {
+                Some(Target::Clip(i)) if !st.source_play && i + 1 < st.s.clips().len() => Some(i + 1),
+                _ => None,
+            }
+        };
+        if let Some(i) = next {
+            self.select(i, None, true);
+        }
+        self.show_playing();
+    }
+
     /// Whether a sound lane is heard in the preview. The export always has every lane.
     pub fn hears(&self, lane: usize) -> bool {
-        self.hear.get(lane).is_none_or(|b| b.is_active())
+        self.mute.get(lane).is_none_or(|b| !b.is_active())
     }
 
     /// Keep the sound lanes playing in step with the montage.
     fn sync_lanes(&self) {
         let st = self.st.borrow();
-        let active = st.s.clip().is_some() && st.s.sound().is_none() && self.player.playing() && !st.detached;
+        let active = st.s.clip().is_some() && st.s.sound().is_none() && self.player.playing() && !st.detached && !st.source_play;
         let at = if active { Some(st.s.montage_time(&floor_us(st.pos))) } else { None };
         for (n, lane_player) in self.lane_players.borrow_mut().iter_mut().enumerate() {
             let hit = at.as_ref().filter(|_| self.hears(n)).and_then(|at| st.s.sound_at(n, at));
@@ -791,6 +926,7 @@ impl App {
     pub fn select(&self, i: usize, pos: Option<f64>, playing: bool) {
         {
             let mut st = self.st.borrow_mut();
+            st.held = None;
             st.s.select(i);
             st.pos = pos.unwrap_or_else(|| st.s.clip().map_or(0.0, |c| to_f64(&c.start)));
         }
@@ -822,13 +958,15 @@ impl App {
     }
 
     fn back_to_clips(&self) {
+        let line = self.montage_pos();
         {
             let mut st = self.st.borrow_mut();
             if st.s.sound().is_none() {
                 return;
             }
             st.s.clear_sound();
-            st.pos = st.clip_pos;
+            let back = st.clip_pos;
+            keep_line(&mut st, line, back);
         }
         self.show_target();
     }
@@ -857,49 +995,83 @@ impl App {
         {
             let mut st = self.st.borrow_mut();
             st.detached = false;
+            st.held = None;
             st.pos = t;
             st.last_pos = t;
         }
         self.player.seek(t, exact);
-        self.trim.set_pos(t, false);
-        self.timeline.set_pos(to_f64(&self.montage_pos()));
         self.show_time();
     }
 
-    pub fn toggle_play(&self) {
-        enum Do {
-            Pause,
-            Replay,
-            RestartSound(f64),
-            Play,
-        }
-        let action = {
-            let st = self.st.borrow();
-            let Some((_, start, end, _)) = st.s.target_span() else { return };
-            let at_end = (st.pos - to_f64(&end)).abs() < to_f64(&st.s.frame()) * 1.5;
-            let sound_mode = st.s.sound().is_some();
-            if self.player.playing() {
-                Do::Pause
-            } else if at_end && !sound_mode && st.s.selected.map(|i| i + 1) == Some(st.s.clips().len()) {
-                Do::Replay // at the very end: play the montage again
-            } else if at_end && sound_mode {
-                Do::RestartSound(to_f64(&start))
-            } else {
-                Do::Play
+    pub fn pause(&self) {
+        self.player.set_playing(false);
+        self.show_playing();
+    }
+
+    /// The button at the start of the trim bar, and Shift+Space: play what the bar shows, by
+    /// itself. That is the whole file, past the in and out points, or only the kept range when
+    /// the bar shows only that. At the end it starts again from the beginning.
+    pub fn play_source(&self) {
+        self.stop_editing();
+        let restart = {
+            let mut st = self.st.borrow_mut();
+            if st.s.target().is_none() {
+                return;
             }
+            if self.player.playing() && st.source_play {
+                drop(st);
+                return self.pause();
+            }
+            st.source_play = true;
+            let (lo, hi) = self.trim.span();
+            let near = to_f64(&st.s.frame()) * 1.5;
+            let ended = self.player.ended() && !st.detached;
+            (ended || st.pos >= hi - near || st.pos < lo - near).then_some(lo)
         };
-        match action {
-            Do::Pause => self.player.set_playing(false),
-            Do::Replay => self.select(0, None, true),
-            Do::RestartSound(start) => {
-                self.seek(start, true);
-                self.player.set_playing(true);
+        match restart {
+            Some(lo) => self.seek(lo, true),
+            None => self.reattach(),
+        }
+        self.player.set_playing(true);
+        self.show_playing();
+    }
+
+    /// The button at the start of the montage, and Space: play the finished video from the
+    /// play line, through every clip. At the end it starts again from the beginning.
+    pub fn play_montage(&self) {
+        self.stop_editing();
+        let jump = {
+            let mut st = self.st.borrow_mut();
+            if st.s.clips().is_empty() {
+                return;
             }
-            Do::Play => {
+            if self.player.playing() && !st.source_play {
+                drop(st);
+                return self.pause();
+            }
+            st.source_play = false;
+            let pos = floor_us(st.pos);
+            let near = st.s.frame() * r(3, 2);
+            let ended = self.player.ended() && !st.detached;
+            // where the play line is on the montage, or None when the preview is already there
+            let at = match (st.held, st.s.sound(), st.s.selected, st.s.clip()) {
+                (Some(line), ..) => Some(line),
+                (None, Some(sound), _, _) => Some(sound.at + (pos - sound.start).max(time::zero())),
+                (None, None, Some(i), Some(c)) if ended || pos >= c.end - near => Some(st.s.offsets()[i] + c.duration()),
+                (None, None, Some(i), Some(c)) if pos < c.start => Some(st.s.offsets()[i]),
+                (None, None, Some(_), Some(_)) => None,
+                _ => return,
+            };
+            at.and_then(|at| st.s.locate(&if at >= st.s.total() - near { time::zero() } else { at }))
+        };
+        match jump {
+            Some((i, source)) => self.select(i, Some(to_f64(&source)), true),
+            None => {
                 self.reattach();
                 self.player.set_playing(true);
             }
         }
+        self.show_playing();
     }
 
     // ------------------------------------------------------------ editing
@@ -913,6 +1085,7 @@ impl App {
     }
 
     fn on_scrub(&self, t: f64, last: bool) {
+        self.stop_editing();
         self.st.borrow_mut().dragging = !last;
         self.player.set_playing(false);
         self.seek(t, last); // keyframes while dragging, the exact frame on release
@@ -920,6 +1093,7 @@ impl App {
 
     /// The play line on the montage is dragged: move through the clips.
     fn on_montage_scrub(&self, t: f64, last: bool) {
+        self.stop_editing();
         let (i, source, change) = {
             let mut st = self.st.borrow_mut();
             let Some((i, source)) = st.s.locate(&floor_us(t)) else { return };
@@ -946,6 +1120,7 @@ impl App {
     }
 
     fn on_trim(&self, which: TrimHit, t: f64, last: bool) {
+        self.stop_editing();
         self.begin_gesture();
         {
             let mut st = self.st.borrow_mut();
@@ -964,7 +1139,7 @@ impl App {
 
     pub fn time_typed(&self, text: &str, which: &str) {
         let t = parse_clock(text);
-        gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        self.stop_editing();
         let has = self.st.borrow().s.target().is_some();
         if let (Some(t), true) = (t, has) {
             if which == "pos" {
@@ -1000,13 +1175,22 @@ impl App {
         self.refresh();
     }
 
-    fn on_clip_click(&self, i: usize, fraction: f64) {
-        let pos = {
-            let st = self.st.borrow();
-            let Some(c) = st.s.clips().get(i) else { return };
-            to_f64(&c.start) + fraction * to_f64(&c.duration())
-        };
-        self.select(i, Some(pos), false);
+    /// A click on a clip selects it, and leaves the play line of the finished video where it is.
+    fn on_clip_click(&self, i: usize) {
+        self.stop_editing();
+        let line = self.montage_pos();
+        {
+            let mut st = self.st.borrow_mut();
+            let same = st.s.selected == Some(i);
+            if i >= st.s.clips().len() || (same && st.s.sound().is_none()) {
+                return; // it is already the one being worked on
+            }
+            st.s.select(i);
+            let at = if same { st.clip_pos } else { to_f64(&st.s.clips()[i].start) };
+            keep_line(&mut st, line, at);
+        }
+        self.load(false);
+        self.refresh();
     }
 
     fn on_clip_move(&self, src: usize, dst: usize, last: bool) {
@@ -1017,13 +1201,17 @@ impl App {
         self.begin_gesture();
         {
             let mut st = self.st.borrow_mut();
+            st.held = None;
             st.s.clear_sound();
             st.s.move_clip(src, dst);
         }
         self.refresh();
     }
 
+    /// A press on a sound selects it, and leaves the play line of the finished video where it is.
     fn on_sound_press(&self, lane: usize, i: usize) {
+        self.stop_editing();
+        let line = self.montage_pos();
         {
             let mut st = self.st.borrow_mut();
             let Some(sound) = st.s.lane_items(lane).get(i).map(|item| item.0) else { return };
@@ -1037,7 +1225,8 @@ impl App {
                 _ => {}
             }
             st.s.select_sound(sound);
-            st.pos = st.s.sound().map_or(0.0, |s| to_f64(&s.start));
+            let at = st.s.sound().map_or(0.0, |s| to_f64(&s.start));
+            keep_line(&mut st, line, at);
         }
         self.load(false);
         self.refresh();
@@ -1067,7 +1256,7 @@ impl App {
         }
         {
             let mut st = self.st.borrow_mut();
-            if st.s.target().is_none() {
+            if !st.s.target_has_sound() {
                 return;
             }
             // one undo step per adjustment, not per pixel of movement
@@ -1086,11 +1275,10 @@ impl App {
         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
         let name = key.name().map(|n| n.to_string()).unwrap_or_default();
         let low = name.to_lowercase();
-        if self.editing().is_some() {
+        if self.editing.get().is_some() {
             // typing a time: only Escape is ours
             if name == "Escape" {
-                gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
-                self.refresh();
+                self.stop_editing();
                 return true;
             }
             return false;
@@ -1100,13 +1288,14 @@ impl App {
                 "z" => {
                     let changed = {
                         let mut st = self.st.borrow_mut();
+                        st.held = None;
                         if shift { st.s.redo() } else { st.s.undo() }
                     };
                     if changed {
                         self.show_target();
                     }
                 }
-                "o" => self.choose_files("Add video files or open a project", false),
+                "o" => self.choose_files("Add video files or open a project", Add::Auto),
                 "e" => self.export(),
                 "s" => self.save(shift),
                 _ => return false,
@@ -1121,7 +1310,9 @@ impl App {
             return false;
         }
         match name.as_str() {
-            "space" => self.toggle_play(),
+            "space" if self.player.playing() => self.pause(),
+            "space" if shift => self.play_source(),
+            "space" => self.play_montage(),
             "Left" | "Right" => {
                 self.player.set_playing(false);
                 self.reattach();
@@ -1129,12 +1320,14 @@ impl App {
                     let duration = self.st.borrow().s.target_info().map_or(0.0, |i| to_f64(&i.duration));
                     self.seek((pos + if name == "Right" { 1.0 } else { -1.0 }).clamp(0.0, duration), true);
                 } else {
+                    self.st.borrow_mut().held = None;
                     self.player.step(name == "Right");
                 }
             }
             "Delete" | "BackSpace" => {
                 {
                     let mut st = self.st.borrow_mut();
+                    st.held = None;
                     if sound_mode {
                         st.s.remove_sound();
                         st.pos = st.clip_pos;
@@ -1178,7 +1371,7 @@ impl App {
 
     // ------------------------------------------------------------ adding files and projects
 
-    fn choose_files(self: &Rc<Self>, title: &str, as_sound: bool) {
+    fn choose_files(self: &Rc<Self>, title: &str, add: Add) {
         let weak = Rc::downgrade(self);
         gtk::FileDialog::builder().title(title).build().open_multiple(Some(&self.window), gio::Cancellable::NONE, move |result| {
             let (Some(a), Ok(files)) = (weak.upgrade(), result) else { return }; // dismissed
@@ -1186,10 +1379,9 @@ impl App {
                 .filter_map(|i| files.item(i).and_downcast::<gio::File>()?.path())
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
-            if as_sound {
-                a.add_files(paths, true);
-            } else {
-                a.open_paths(paths);
+            match add {
+                Add::Auto => a.open_paths(paths),
+                lane => a.add_files(paths, lane),
             }
         });
     }
@@ -1200,10 +1392,10 @@ impl App {
         if let Some(project) = paths.iter().find(|p| is_project(p)) {
             self.open_project(project);
         }
-        self.add_files(paths.into_iter().filter(|p| !is_project(p)).collect(), false);
+        self.add_files(paths.into_iter().filter(|p| !is_project(p)).collect(), Add::Auto);
     }
 
-    pub fn add_files(&self, paths: Vec<String>, as_sound: bool) {
+    pub fn add_files(&self, paths: Vec<String>, add: Add) {
         if paths.is_empty() {
             return;
         }
@@ -1219,8 +1411,8 @@ impl App {
                         continue;
                     }
                 };
-                let wants_index = quick.video.is_some() && !as_sound;
-                let _ = tx.send(Msg::Added { path: path.clone(), info: Box::new(quick), as_sound });
+                let wants_index = quick.video.is_some() && add == Add::Auto;
+                let _ = tx.send(Msg::Added { path: path.clone(), info: Box::new(quick), add });
                 if wants_index {
                     // keyframe index; slower on big files, needed for lossless export
                     if let Ok(full) = probe(&path, true) {
@@ -1231,8 +1423,12 @@ impl App {
         });
     }
 
-    fn added(&self, path: &str, info: MediaInfo, as_sound: bool) {
-        if as_sound || info.video.is_none() {
+    fn added(&self, path: &str, info: MediaInfo, add: Add) {
+        let lane = match add {
+            Add::Lane(n) => Some(n),
+            Add::Auto => None,
+        };
+        if lane.is_some() || info.video.is_none() {
             let at = self.montage_pos();
             let result = {
                 let mut st = self.st.borrow_mut();
@@ -1244,7 +1440,11 @@ impl App {
                     if st.s.sound().is_none() {
                         st.clip_pos = st.pos;
                     }
-                    st.s.add_sound(path, info, at).map(|_| st.pos = 0.0)
+                    // the new item starts at the play line, and the play position at the item's start
+                    st.s.add_sound(path, info, at, lane).map(|_| {
+                        st.pos = 0.0;
+                        st.held = None;
+                    })
                 }
             };
             match result {
@@ -1415,6 +1615,36 @@ impl App {
     }
 }
 
+/// Where the play position falls in the finished video.
+fn line_of(st: &St) -> R {
+    match st.s.sound() {
+        Some(sound) => sound.at + (floor_us(st.pos) - sound.start).max(time::zero()),
+        None if st.s.clip().is_some() => st.s.montage_time(&floor_us(st.pos)),
+        None => time::zero(),
+    }
+}
+
+/// After a click has changed what is selected: keep the play line of the finished video at
+/// `line`. If that moment lies within what is now selected, the play position becomes that
+/// same moment. Otherwise the play position goes to `at`, and the line is held where it was.
+fn keep_line(st: &mut St, line: R, at: f64) {
+    let span = match (st.s.sound(), st.s.selected, st.s.clip()) {
+        (Some(s), _, _) => Some((s.at, s.start, s.end)),
+        (None, Some(i), Some(c)) => Some((st.s.offsets()[i], c.start, c.end)),
+        _ => None,
+    };
+    match span {
+        Some((from, start, end)) if from <= line && line < from + (end - start) => {
+            st.pos = to_f64(&(start + (line - from)));
+            st.held = None;
+        }
+        _ => {
+            st.pos = at;
+            st.held = (line_of(st) != line).then_some(line);
+        }
+    }
+}
+
 fn keyframes_of(st: &mut St, media: &str) -> Rc<Vec<f64>> {
     let marker = st.s.infos.get(media).and_then(|i| i.keyframes.as_ref()).map(Vec::len);
     if let Some((m, cached)) = st.kf_cache.get(media) {
@@ -1460,6 +1690,7 @@ mod tests {
 
     #[test]
     fn clock_and_parse() {
+        assert_eq!((short_clock(0.0), short_clock(7.36), short_clock(75.0), short_clock(3723.96)), ("0:00.0".into(), "0:07.4".into(), "1:15.0".into(), "1:02:04.0".into()));
         assert_eq!(clock(0.0), "0:00.000");
         assert_eq!(clock(75.5), "1:15.500");
         assert_eq!(clock(3723.5), "1:02:03.500");

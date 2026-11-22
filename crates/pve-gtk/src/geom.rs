@@ -8,6 +8,8 @@ pub const PAD: f64 = 14.0;
 pub const GRAB: f64 = 6.0;
 /// Knob size.
 pub const KNOB: f64 = 12.0;
+/// Space between a knob and the time written beside it.
+pub const LABEL_GAP: f64 = 5.0;
 
 // ---------------------------------------------------------------- trim bar
 
@@ -18,13 +20,23 @@ pub enum TrimHit {
     Out,
 }
 
+/// The three times written on the trim bar. Each can be clicked and typed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimLabel {
+    Pos,
+    In,
+    Out,
+}
+
 /// The trim bar: the source of the thing being trimmed, in three bands.
 ///
-///   top     the play position: a down-pointing triangle to drag, and clicking here moves it
+///   top     the play position: a down-pointing triangle to drag, with its time beside it
 ///   middle  the source, with the kept range, keyframe ticks, and the three lines
-///   bottom  triangles for the in and out points, each pointing at its line from outside the kept range
+///   bottom  triangles for the in and out points, each pointing at its line from outside the kept range,
+///           with their times beside them
 ///
-/// Clicking the middle band away from a line does nothing, so a missed grab never moves anything.
+/// A press in the top or middle band away from the cut lines puts the play position there.
+/// The cut points move only by their own lines and knobs, so a missed grab never trims anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimGeom {
     pub width: f64,
@@ -39,8 +51,9 @@ pub struct TrimGeom {
 
 impl TrimGeom {
     /// Heights of the top and bottom bands.
-    pub const TOP: f64 = 18.0;
-    pub const BOTTOM: f64 = 18.0;
+    pub const TOP: f64 = 20.0;
+    pub const BOTTOM: f64 = 20.0;
+    pub const HEIGHT: f64 = 70.0;
     /// Most zoomed-in view, seconds.
     pub const MIN_SPAN: f64 = 2.0;
 
@@ -84,18 +97,80 @@ impl TrimGeom {
         }
         let (d_in, d_out, d_play) = ((x - xi).abs(), (x - xo).abs(), (x - xp).abs());
         let trim = (d_in.min(d_out) <= GRAB).then_some(if d_in < d_out || (d_in == d_out && x < xi) { TrimHit::In } else { TrimHit::Out });
-        if d_play <= GRAB && (trim.is_none() || y < self.height / 2.0) {
+        if d_play <= GRAB && y < self.height / 2.0 {
             return Some(TrimHit::Play); // where lines coincide, the upper half is the play line
         }
-        trim
+        trim.or(Some(TrimHit::Play)) // anywhere else on the bar: the play position goes there
     }
 
-    /// Mouse cursor to show at (x, y).
+    /// Mouse cursor to show at (x, y): the double arrow on anything that slides along the bar.
     pub fn cursor(&self, x: f64, y: f64) -> Option<&'static str> {
+        let reach = if y < Self::TOP { KNOB } else { GRAB };
         match self.hit(x, y)? {
-            TrimHit::In | TrimHit::Out => Some("ew-resize"),
-            TrimHit::Play if y >= Self::TOP || (x - self.x(self.pos)).abs() <= KNOB => Some("grab"),
-            TrimHit::Play => Some("pointer"),
+            // away from the play line itself, a press brings it here
+            TrimHit::Play if (x - self.x(self.pos)).abs() > reach => Some("pointer"),
+            _ => Some("ew-resize"),
+        }
+    }
+
+    fn in_view(&self, t: f64) -> bool {
+        (self.view.0..=self.view.1).contains(&t)
+    }
+
+    /// The play position as drawn. A player can report a time a little past the end of the
+    /// file; the line stays on the bar.
+    pub fn line_pos(&self) -> f64 {
+        self.pos.clamp(0.0, self.duration.max(0.0))
+    }
+
+    /// Left edge of the play position's time, `w` wide: right of its knob, or left of it
+    /// where the bar ends. None when the play position is outside the view.
+    pub fn pos_label_x(&self, w: f64) -> Option<f64> {
+        let pos = self.line_pos();
+        if !self.in_view(pos) {
+            return None;
+        }
+        let x = self.x(pos);
+        let right = x + KNOB / 2.0 + LABEL_GAP;
+        Some(if right + w <= self.width { right } else { x - KNOB / 2.0 - LABEL_GAP - w })
+    }
+
+    /// Left edges of the in and out times, `w_in` and `w_out` wide.
+    ///
+    /// Each sits on the outer side of its knob. Where the bar ends before there is room, it
+    /// moves to the inner side of its line; and where the kept range is too narrow for that,
+    /// the two sit together beyond the other knob, in then out. A cut point outside a
+    /// zoomed view has its time at the edge it lies beyond.
+    pub fn cut_label_x(&self, w_in: f64, w_out: f64) -> (Option<f64>, Option<f64>) {
+        const APART: f64 = 10.0;
+        let (xs, xe) = (self.x(self.start), self.x(self.end));
+        let left = xs - KNOB - LABEL_GAP; // an in time on the outer side ends here
+        let right = xe + KNOB + LABEL_GAP; // an out time on the outer side starts here
+        let between = xe - xs - 2.0 * LABEL_GAP;
+        let in_fits = left - w_in >= 0.0;
+        let out_fits = right + w_out <= self.width;
+        match (self.in_view(self.start), self.in_view(self.end)) {
+            (true, true) => {
+                let (i, o) = match (in_fits, out_fits) {
+                    (true, true) => (left - w_in, right),
+                    (false, false) => (xs + LABEL_GAP, xe - LABEL_GAP - w_out),
+                    (false, true) if between >= w_in => (xs + LABEL_GAP, right),
+                    (false, true) => (right, right + w_in + APART),
+                    (true, false) if between >= w_out => (left - w_in, xe - LABEL_GAP - w_out),
+                    (true, false) => (left - w_out - APART - w_in, left - w_out),
+                };
+                (Some(i), Some(o))
+            }
+            (true, false) => {
+                let i = if in_fits { left - w_in } else { xs + LABEL_GAP };
+                let o = self.width - w_out;
+                (Some(i), (self.end > self.view.1 && i + w_in + APART <= o).then_some(o))
+            }
+            (false, true) => {
+                let o = if out_fits { right } else { xe - LABEL_GAP - w_out };
+                ((self.start < self.view.0 && w_in + APART <= o).then_some(0.0), Some(o))
+            }
+            (false, false) => ((self.start < self.view.0).then_some(0.0), (self.end > self.view.1).then_some(self.width - w_out)),
         }
     }
 
@@ -155,14 +230,15 @@ pub struct TimelineGeom {
 }
 
 impl TimelineGeom {
-    pub const CLIP_Y: f64 = 4.0;
+    // The rows are as tall as the buttons that stand at their ends, with the same gaps (see app.rs).
+    pub const CLIP_Y: f64 = 0.0;
     pub const CLIP_H: f64 = 30.0;
-    pub const LANE_Y: f64 = 38.0;
-    pub const LANE_H: f64 = 18.0;
-    pub const LANE_GAP: f64 = 3.0;
+    pub const LANE_H: f64 = 26.0;
+    pub const LANE_GAP: f64 = 4.0;
+    pub const LANE_Y: f64 = Self::CLIP_Y + Self::CLIP_H + Self::LANE_GAP;
 
     pub fn height(lanes: usize) -> f64 {
-        Self::LANE_Y + lanes as f64 * (Self::LANE_H + Self::LANE_GAP) + 2.0
+        Self::LANE_Y + lanes as f64 * (Self::LANE_H + Self::LANE_GAP) - Self::LANE_GAP
     }
 
     pub fn total(&self) -> f64 {
@@ -201,9 +277,24 @@ impl TimelineGeom {
         self.total() > 0.0 && (x - self.line_x(pos)).abs() <= GRAB
     }
 
-    /// Mouse cursor to show at (x, y) with the play line at `pos`.
+    /// Mouse cursor to show at (x, y) with the play line at `pos`: the double arrow on the
+    /// line, which slides; the hand on clips and sounds, which are picked up and carried.
     pub fn cursor(&self, pos: f64, x: f64, y: f64) -> Option<&'static str> {
-        (self.line_hit(pos, x) || self.sound_hit(x, y).is_some()).then_some("grab")
+        if self.line_hit(pos, x) {
+            Some("ew-resize")
+        } else {
+            (self.sound_hit(x, y).is_some() || self.clip_hit(x, y).is_some()).then_some("grab")
+        }
+    }
+
+    /// Montage time at which each clip starts.
+    pub fn starts(&self) -> Vec<f64> {
+        let mut t = 0.0;
+        self.clips.iter().map(|(_, d)| {
+            let at = t;
+            t += d;
+            at
+        }).collect()
     }
 
     /// (x, width) per clip.
@@ -357,7 +448,7 @@ mod tests {
     use super::*;
 
     fn trim() -> TrimGeom {
-        TrimGeom { width: 1028.0, height: 66.0, duration: 100.0, start: 20.0, end: 60.0, pos: 40.0, view: (0.0, 100.0) }
+        TrimGeom { width: 1028.0, height: TrimGeom::HEIGHT, duration: 100.0, start: 20.0, end: 60.0, pos: 40.0, view: (0.0, 100.0) }
     }
 
     #[test]
@@ -370,11 +461,11 @@ mod tests {
     #[test]
     fn trim_bar_bands() {
         let g = trim();
-        let (mid, low) = (33.0, 58.0);
+        let (mid, low) = (35.0, 62.0);
         // top band: always the play position
         assert_eq!(g.hit(g.x(90.0), 5.0), Some(TrimHit::Play));
-        // middle band: only near a line
-        assert_eq!(g.hit(g.x(80.0), mid), None);
+        // middle band: a cut line when near one, otherwise the play position
+        assert_eq!(g.hit(g.x(80.0), mid), Some(TrimHit::Play));
         assert_eq!(g.hit(g.x(20.0) + 3.0, mid), Some(TrimHit::In));
         assert_eq!(g.hit(g.x(60.0) - 3.0, mid), Some(TrimHit::Out));
         assert_eq!(g.hit(g.x(40.0) + 2.0, mid), Some(TrimHit::Play));
@@ -389,17 +480,61 @@ mod tests {
     fn where_lines_coincide_the_upper_half_is_the_play_line() {
         let mut g = trim();
         g.pos = 20.0;
-        assert_eq!(g.hit(g.x(20.0), 22.0), Some(TrimHit::Play));
-        assert_eq!(g.hit(g.x(20.0), 44.0), Some(TrimHit::In));
+        assert_eq!(g.hit(g.x(20.0), 24.0), Some(TrimHit::Play));
+        assert_eq!(g.hit(g.x(20.0), 46.0), Some(TrimHit::In));
     }
 
     #[test]
     fn trim_bar_cursors() {
         let g = trim();
-        assert_eq!(g.cursor(g.x(20.0) - 5.0, 58.0), Some("ew-resize"));
-        assert_eq!(g.cursor(g.x(40.0), 6.0), Some("grab"));
+        // the double arrow on the cut knobs, and on the play knob and its line
+        assert_eq!(g.cursor(g.x(20.0) - 5.0, 62.0), Some("ew-resize"));
+        assert_eq!(g.cursor(g.x(40.0), 6.0), Some("ew-resize"));
+        assert_eq!(g.cursor(g.x(40.0), 35.0), Some("ew-resize"));
         assert_eq!(g.cursor(g.x(80.0), 6.0), Some("pointer"));
-        assert_eq!(g.cursor(g.x(80.0), 33.0), None);
+        assert_eq!(g.cursor(g.x(80.0), 35.0), Some("pointer"));
+        assert_eq!(g.cursor(g.x(80.0), 62.0), None);
+    }
+
+    #[test]
+    fn the_play_line_stays_on_the_bar_past_the_end() {
+        let mut g = trim();
+        g.pos = 100.04; // a player can stop a little past the length of the file
+        assert_eq!(g.line_pos(), 100.0);
+        assert_eq!(g.pos_label_x(70.0), Some(g.x(100.0) - 6.0 - LABEL_GAP - 70.0)); // no room on the right: left of the knob
+        g.pos = 40.0;
+        assert_eq!(g.pos_label_x(70.0), Some(g.x(40.0) + 6.0 + LABEL_GAP));
+        g.view = (50.0, 100.0);
+        assert_eq!(g.pos_label_x(70.0), None);
+    }
+
+    #[test]
+    fn cut_times_sit_beside_their_knobs() {
+        let w = 70.0;
+        let at = |start: f64, end: f64| {
+            let g = TrimGeom { start, end, ..trim() };
+            let (i, o) = g.cut_label_x(w, w);
+            (i.unwrap() - g.x(start), o.unwrap() - g.x(end))
+        };
+        let (outer_in, outer_out) = (-(KNOB + LABEL_GAP + w), KNOB + LABEL_GAP);
+        // room on both sides: each on the outer side of its knob
+        assert_eq!(at(20.0, 60.0), (outer_in, outer_out));
+        // nothing trimmed: no room outside, so both inside the kept range
+        assert_eq!(at(0.0, 100.0), (LABEL_GAP, -LABEL_GAP - w));
+        // a wide cut from the very start: the in time moves inside
+        assert_eq!(at(0.0, 40.0), (LABEL_GAP, outer_out));
+        // a short cut at the very start: both right of the knobs, in then out
+        let g = TrimGeom { start: 0.0, end: 3.0, ..trim() };
+        let (i, o) = g.cut_label_x(w, w);
+        assert_eq!((i, o), (Some(g.x(3.0) + KNOB + LABEL_GAP), Some(g.x(3.0) + KNOB + LABEL_GAP + w + 10.0)));
+        // and at the very end: both left of the knobs, in then out
+        let g = TrimGeom { start: 97.0, end: 100.0, ..trim() };
+        let (i, o) = g.cut_label_x(w, w);
+        assert_eq!(o, Some(g.x(97.0) - KNOB - LABEL_GAP - w));
+        assert_eq!(i, Some(o.unwrap() - 10.0 - w));
+        // zoomed in between the cut points: each time at the edge its knob lies beyond
+        let g = TrimGeom { view: (30.0, 50.0), ..trim() };
+        assert_eq!(g.cut_label_x(w, w), (Some(0.0), Some(g.width - w)));
     }
 
     #[test]
@@ -435,11 +570,14 @@ mod tests {
         assert_eq!(g.clip_hit(139.0, 10.0), Some((0, 0.5)));
         assert_eq!(g.clip_hit(300.0, 10.0).map(|h| h.0), Some(1));
         assert_eq!(g.clip_hit(300.0, 45.0), None);
-        assert_eq!((g.lane_at(40.0), g.lane_at(62.0), g.lane_at(90.0), g.lane_at(10.0)), (Some(0), Some(1), None, None));
+        assert_eq!(TimelineGeom::height(2), 90.0);
+        assert_eq!((TimelineGeom::lane_y(0), TimelineGeom::lane_y(1)), (34.0, 64.0));
+        assert_eq!((g.lane_at(40.0), g.lane_at(70.0), g.lane_at(95.0), g.lane_at(10.0)), (Some(0), Some(1), None, None));
         assert_eq!(g.sound_hit(g.x(6.0), 45.0), Some((0, 0)));
         assert_eq!(g.sound_hit(g.x(16.0), 45.0), None);
-        assert_eq!(g.sound_hit(g.x(6.0), 65.0), None);
+        assert_eq!(g.sound_hit(g.x(6.0), 70.0), None);
         assert!((g.t(g.x(12.5)) - 12.5).abs() < 1e-9);
+        assert_eq!(g.starts(), vec![0.0, 10.0]);
     }
 
     #[test]
@@ -448,9 +586,10 @@ mod tests {
         let x = g.line_x(20.0);
         assert_eq!(x, g.x(20.0));
         assert!(g.line_hit(20.0, x - 6.0) && g.line_hit(20.0, x + 6.0) && !g.line_hit(20.0, x + 7.0));
-        // the whole height of the line is grabbable, and it comes before a sound item under it
-        assert_eq!((g.cursor(20.0, x, 10.0), g.cursor(20.0, x, 65.0), g.cursor(20.0, x + 30.0, 65.0)), (Some("grab"), Some("grab"), None));
-        assert_eq!(g.cursor(20.0, g.x(6.0), 45.0), Some("grab"));
+        // the whole height of the line is grabbable, and it comes before a clip or sound item under it
+        assert_eq!((g.cursor(20.0, x, 10.0), g.cursor(20.0, x, 70.0), g.cursor(20.0, x + 30.0, 70.0)), (Some("ew-resize"), Some("ew-resize"), None));
+        // clips and sound items are picked up with the hand
+        assert_eq!((g.cursor(20.0, g.x(6.0), 45.0), g.cursor(20.0, g.x(30.0), 10.0)), (Some("grab"), Some("grab")));
         // past the end of the montage the line stays on the bar, and times stay inside the montage
         assert_eq!(g.line_x(55.0), 1014.0);
         assert_eq!((g.time_at(-50.0), g.time_at(5000.0), g.time_at(g.x(12.5))), (0.0, 40.0, 12.5));

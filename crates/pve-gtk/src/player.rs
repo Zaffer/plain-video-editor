@@ -15,6 +15,8 @@ use crate::mpv::{Event, Mpv, Renderer};
 pub enum PlayerEvent {
     Time(f64),
     Paused(bool),
+    /// Playback ran into the end of the file and stopped there.
+    Ended,
 }
 
 struct Inner {
@@ -31,6 +33,10 @@ struct Inner {
     /// A load asked for before the GL context existed.
     deferred: Option<(String, f64, bool)>,
     paused: bool,
+    /// The end of the file has been reached (mpv then stays on the last frame, paused).
+    eof: bool,
+    /// The app has been told so.
+    eof_told: bool,
     /// What mpv was last told about sound, so it is only told again when it changes.
     sound: Option<(bool, f64)>,
     /// How many frames have been drawn, and (when asked for by a test) the centre pixel of the last one.
@@ -60,6 +66,7 @@ impl Player {
         ])?;
         mpv.observe_number("time-pos");
         mpv.observe_flag("pause");
+        mpv.observe_flag("eof-reached");
         let area = gtk::GLArea::builder().hexpand(true).vexpand(true).auto_render(false).build();
         let player = Player {
             area,
@@ -72,6 +79,8 @@ impl Player {
                 pending: None,
                 deferred: None,
                 paused: true,
+                eof: false,
+                eof_told: false,
                 sound: None,
                 drawn: 0,
                 sample: None,
@@ -150,6 +159,7 @@ impl Player {
         {
             let mut inner = self.inner.borrow_mut();
             let mut latest = None;
+            let mut ran_out = false;
             while let Some(ev) = inner.mpv.as_ref().and_then(Mpv::poll) {
                 match ev {
                     Event::PlaybackRestart => {
@@ -161,15 +171,30 @@ impl Player {
                     }
                     // ignore times left over from a file that is being replaced
                     Event::Number(name, Some(t)) if name == "time-pos" && inner.loaded => latest = Some(t),
+                    // At the end of a file mpv says so and pauses, in either order.
                     Event::Flag(name, paused) if name == "pause" => {
+                        ran_out |= paused && !inner.paused && inner.eof;
                         inner.paused = paused;
                         out.push(PlayerEvent::Paused(paused));
+                    }
+                    Event::Flag(name, false) if name == "eof-reached" => {
+                        inner.eof = false;
+                        inner.eof_told = false;
+                    }
+                    // ...and an end left over from before a seek or a load is not this one
+                    Event::Flag(name, true) if name == "eof-reached" && inner.loaded && !inner.busy => {
+                        inner.eof = true;
+                        ran_out |= !inner.paused;
                     }
                     _ => {}
                 }
             }
             if let Some(t) = latest {
                 out.push(PlayerEvent::Time(t)); // one update per poll is enough
+            }
+            if ran_out && !inner.eof_told {
+                inner.eof_told = true;
+                out.push(PlayerEvent::Ended); // after the time, which may already have moved playback on
             }
         }
         if let Some((t, exact)) = reseek {
@@ -191,6 +216,7 @@ impl Player {
                 inner.loaded = false;
                 inner.busy = true;
                 inner.pending = None;
+                inner.eof = false;
                 inner.paused = !playing;
                 if let Some(mpv) = inner.mpv.as_ref() {
                     mpv.set("start", &format!("{at:.6}"));
@@ -221,6 +247,7 @@ impl Player {
             return;
         }
         inner.busy = true;
+        inner.eof = false;
         if let Some(mpv) = inner.mpv.as_ref() {
             mpv.command(&["seek", &format!("{:.6}", t.max(0.0)), if exact { "absolute+exact" } else { "absolute+keyframes" }]);
         }
@@ -240,6 +267,11 @@ impl Player {
     pub fn playing(&self) -> bool {
         let inner = self.inner.borrow();
         inner.mpv.is_some() && !inner.paused
+    }
+
+    /// The file is at its end: playing does nothing until it is moved back.
+    pub fn ended(&self) -> bool {
+        self.inner.borrow().eof
     }
 
     /// (frames drawn so far, centre pixel of the last one if a test asked for sampling)
