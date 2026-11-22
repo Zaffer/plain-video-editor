@@ -48,25 +48,7 @@ Put clips of your own in `examples/` to follow the commands here.
 
 ## The window
 
-<img src="data/image.png" alt="preview of the software with a tv testing signal thing in the preview">
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                                                     [⏏ Export]  [☰] │
-│                                                                      │
-│                              preview                                 │
-│                    crop rectangle drawn over it                      │
-│                                                                      │
-│  Volume ───●─── 100%                  Crop [shapes ...]  ☑ All clips │
-│                    ▼ 0:12.400                                        │
-│ [▶]  ░░░░░░░│▓▓▓▓▓▓▓▓ 10.000 s ▓▓▓▓▓▓▓│░░░░░░░░░░░░░░ 1:30.000  [⤢]  │
-│    0:05.000 ▶                         ◀ 0:15.000                     │
-│ [▶]  [0:00.0 clip1      ][0:10.0 clip2            ]             [+]  │
-│ [♪]                      [0:10.0 clip2            ]             [+]  │
-│ [♪]        [0:07.0 music               ]                        [+]  │
-│  0:07.400 / 0:20.000 · Lossless copy · cuts move out +1.7 s  ☐ Exact │
-└──────────────────────────────────────────────────────────────────────┘
-```
+<img src="docs/screenshot.png" alt="The window: the preview with a crop rectangle over it, then the volume and crop controls, the trim bar, the montage of three clips, the two sound lanes, and the line that says what Export will do">
 
 There are four rows, each with a button at its start and one at its end:
 
@@ -188,7 +170,8 @@ crates/pve-native/    ffprobe and ffmpeg, and the pve command line
 crates/pve-gtk/       the pve-gui window
 testdata/             plan cases and their expected results
 examples/             a project to try; your own clips go here
-data/                 the logo and the desktop entry
+data/                 the logo and the desktop entry, installed with the programs
+docs/                 the picture in this file
 dev-env.sh            builds the window without the -dev packages installed
 ```
 
