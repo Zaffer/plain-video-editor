@@ -555,6 +555,14 @@ impl Session {
         }
     }
 
+    /// Slide the selected sound along the montage by `by` (negative: earlier), not past the
+    /// start. A clip's own sound is unlinked by it, as by any move. The caller checkpoints.
+    pub fn nudge_sound(&mut self, by: R) {
+        if let Some(sound) = self.sound() {
+            self.move_sound(sound.at + by, None);
+        }
+    }
+
     pub fn remove_sound(&mut self) {
         match self.target() {
             Some(Target::Own(i)) => {
@@ -575,6 +583,17 @@ impl Session {
     /// Clips' own sounds are not included: they play with their clip.
     pub fn sound_at(&self, lane: usize, t: &R) -> Option<(&AudioItem, R)> {
         self.project.lanes.get(lane)?.items.iter().find(|it| it.at <= *t && *t < it.at + it.duration()).map(|it| (it, it.start + (*t - it.at)))
+    }
+
+    /// What `lane` has to have ready at montage time t: the stored item playing then, or
+    /// failing that the next one to start, with the time within its source to be at, and
+    /// whether it is sounding at t. A preview uses it to have each sound waiting in place.
+    pub fn sound_cue(&self, lane: usize, t: &R) -> Option<(&AudioItem, R, bool)> {
+        if let Some((item, source_time)) = self.sound_at(lane, t) {
+            return Some((item, source_time, true));
+        }
+        let next = self.project.lanes.get(lane)?.items.iter().filter(|it| it.at > *t).min_by_key(|it| it.at)?;
+        Some((next, next.start, false))
     }
 
     // ------------------------------------------------------------ crop
@@ -884,7 +903,14 @@ mod tests {
         s.select_sound(SoundRef::Item(1, 0));
         assert_eq!(s.sound_at(1, &int(3)).map(|(_, t)| t), Some(int(11)));
         assert!(s.sound_at(1, &int(4000)).is_none());
+        // what the lane should have waiting: the item sounding now, else the next one, at its start
+        assert_eq!(s.sound_cue(1, &int(3)).map(|(it, t, on)| (it.at, t, on)), Some((int(0), int(11), true)));
+        assert_eq!(s.sound_cue(1, &int(4000)).map(|c| c.2), None);
+        assert_eq!(s.sound_cue(1, &r(-1, 1)).map(|(it, t, on)| (it.at, t, on)), Some((int(0), int(8), false)));
         assert!(s.sound_at(0, &int(12)).is_none()); // a clip's own sound plays with its clip
+        s.nudge_sound(r(1, 30));
+        s.nudge_sound(int(-1));
+        assert_eq!(s.sound().unwrap().at, int(0)); // slid a frame later, then a second earlier: not past the start
         s.move_sound(int(40), Some(0));
         assert_eq!((s.sel_audio, s.sound().unwrap().at, s.lanes()[1].items.len()), (Some((0, 0)), int(40), 1));
         s.set_gain(-200.0);

@@ -138,10 +138,23 @@ enum Msg {
     ExportDone(String),
 }
 
+/// Playing the finished video has been asked for and the picture is not moving yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Starting {
+    No,
+    /// The player is still loading the file or finding the place.
+    Finding,
+    /// The sounds in the lanes have been let go; the picture follows at this moment, when
+    /// they are heard. The second number is how long that wait is in all.
+    Sounds(Instant, f64),
+}
+
 pub struct St {
     pub s: Session,
     /// Play position: source time within the target (selected clip, or sound item).
     pub pos: f64,
+    /// When the player last said where it was: while it plays it has moved on since.
+    pos_at: Instant,
     last_pos: f64,
     /// Play position to go back to after working on a sound item.
     clip_pos: f64,
@@ -161,9 +174,14 @@ pub struct St {
     pub cancel: Option<Arc<AtomicBool>>,
     /// When the volume was last changed (one undo step per adjustment).
     volume_edit: Option<Instant>,
+    /// When a sound was last slid along its lane with the arrow keys (one undo step per run of presses).
+    nudge_edit: Option<Instant>,
     caps: Capabilities,
     kf_cache: HashMap<String, (Option<usize>, Rc<Vec<f64>>)>,
     ticks: u64,
+    /// Whether the preview's picture was moving at the last tick.
+    was_moving: bool,
+    starting: Starting,
 }
 
 pub struct App {
@@ -359,6 +377,7 @@ impl App {
             st: RefCell::new(St {
                 s: Session::new(),
                 pos: 0.0,
+                pos_at: Instant::now(),
                 last_pos: 0.0,
                 clip_pos: 0.0,
                 held: None,
@@ -369,9 +388,12 @@ impl App {
                 source_play: false,
                 cancel: None,
                 volume_edit: None,
+                nudge_edit: None,
                 caps: Capabilities::default(),
                 kf_cache: HashMap::new(),
                 ticks: 0,
+                was_moving: false,
+                starting: Starting::No,
             }),
             syncing: Cell::new(false),
             tx,
@@ -613,12 +635,17 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             self.message(msg);
         }
-        let ticks = {
+        self.carry_on_starting();
+        // The lanes are looked at a few times a second, and at once when the picture starts
+        // or stops moving: a sound that starts a moment after its picture is heard as late.
+        let moving = self.player.running();
+        let due = {
             let mut st = self.st.borrow_mut();
             st.ticks += 1;
-            st.ticks
+            let turned = std::mem::replace(&mut st.was_moving, moving) != moving;
+            turned || st.ticks.is_multiple_of(4)
         };
-        if ticks % 4 == 0 {
+        if due {
             self.sync_lanes();
         }
     }
@@ -699,7 +726,7 @@ impl App {
 
     /// Each play button shows a pause sign while its kind of play is running.
     fn show_playing(&self) {
-        let (playing, source) = (self.player.playing(), self.st.borrow().source_play);
+        let (playing, source) = (self.playing(), self.st.borrow().source_play);
         let icon = |on: bool| if on { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" };
         self.clip_play_btn.set_icon_name(icon(playing && source));
         self.play_btn.set_icon_name(icon(playing && !source));
@@ -843,6 +870,7 @@ impl App {
                 return;
             }
             st.pos = t;
+            st.pos_at = Instant::now();
             if self.player.playing() {
                 st.held = None;
             }
@@ -893,19 +921,75 @@ impl App {
         self.mute.get(lane).is_none_or(|b| !b.is_active())
     }
 
-    /// Keep the sound lanes playing in step with the montage.
+    /// Keep the sound lanes in step with the finished video: playing along with it, and
+    /// while it is paused, waiting at the play line for it to start.
     fn sync_lanes(&self) {
+        let line = self.montage_pos();
         let st = self.st.borrow();
-        let active = st.s.clip().is_some() && st.s.sound().is_none() && self.player.playing() && !st.detached && !st.source_play;
-        let at = if active { Some(st.s.montage_time(&floor_us(st.pos))) } else { None };
+        // The lanes go with the clips: not while one sound is worked on, nor while a line is dragged.
+        let live = st.s.clip().is_some() && st.s.sound().is_none() && !st.dragging;
+        // About to play: the sounds go first, by the time they take to be heard.
+        let ahead = match st.starting {
+            Starting::Sounds(_, lead) if live => Some(lead),
+            _ => None,
+        };
+        let rolling = live && self.player.playing() && !st.detached && !st.source_play;
+        // The player reports a time once per picture; between reports it has moved on. Without
+        // this the lanes would be steered by a clock that moves in steps.
+        let moving = self.player.running();
+        let since = if moving { st.pos_at.elapsed().as_secs_f64().min(0.06) } else { 0.0 };
+        let at = if rolling { st.s.montage_time(&floor_us(st.pos + since)) } else { line };
         for (n, lane_player) in self.lane_players.borrow_mut().iter_mut().enumerate() {
-            let hit = at.as_ref().filter(|_| self.hears(n)).and_then(|at| st.s.sound_at(n, at));
-            match hit {
-                Some((item, source_time)) => {
-                    lane_player.sync(Some((&st.s.project.media[&item.media], to_f64(&source_time), st.s.lanes()[n].gain_db + item.gain_db)))
+            match st.s.sound_cue(n, &at).filter(|_| live && self.hears(n)) {
+                Some((item, source_time, sounding)) => {
+                    let want = (st.s.project.media[&item.media].as_str(), to_f64(&source_time), st.s.lanes()[n].gain_db + item.gain_db);
+                    // a sound that begins during play is likewise let go a little before its moment
+                    let until = to_f64(&(item.at - at));
+                    let soon = !sounding && rolling && moving && until <= lane_player.start_lead();
+                    match ahead {
+                        Some(lead) => lane_player.sync(Some(want), sounding, true, lead),
+                        None => lane_player.sync(Some(want), rolling && (sounding || soon), moving, if soon { until } else { 0.0 }),
+                    }
                 }
-                None => lane_player.sync(None),
+                None => lane_player.sync(None, false, false, 0.0),
             }
+        }
+    }
+
+    /// Playing, or about to: what the buttons and the space bar go by.
+    pub fn playing(&self) -> bool {
+        self.player.playing() || self.st.borrow().starting != Starting::No
+    }
+
+    /// Stop the picture, and any start that was under way.
+    fn stop(&self) {
+        self.st.borrow_mut().starting = Starting::No;
+        self.player.set_playing(false);
+    }
+
+    /// Start the finished video. Sound in a lane is heard a moment after it is let go, so
+    /// when a lane has something to play here, the sounds go first and the picture follows
+    /// when they are heard. Called on every tick until the picture moves.
+    fn carry_on_starting(&self) {
+        let starting = self.st.borrow().starting;
+        let go = match starting {
+            Starting::No => return,
+            Starting::Finding if !self.player.settled() => return,
+            Starting::Finding => {
+                let lead = self.lanes_lead(&self.montage_pos());
+                if lead > 0.02 {
+                    self.st.borrow_mut().starting = Starting::Sounds(Instant::now() + Duration::from_secs_f64(lead), lead);
+                    self.sync_lanes();
+                }
+                lead <= 0.02
+            }
+            Starting::Sounds(at, _) => Instant::now() >= at,
+        };
+        if go {
+            self.st.borrow_mut().starting = Starting::No;
+            self.player.set_playing(true);
+            self.sync_lanes();
+            self.show_playing();
         }
     }
 
@@ -914,6 +998,7 @@ impl App {
     fn load(&self, playing: bool) {
         let (path, pos) = {
             let mut st = self.st.borrow_mut();
+            st.starting = Starting::No;
             st.detached = false;
             st.last_pos = st.pos;
             (st.s.target_path().map(str::to_owned), st.pos)
@@ -987,7 +1072,7 @@ impl App {
     /// Show the frame at t without moving the play position.
     fn preview(&self, t: f64) {
         self.st.borrow_mut().detached = true;
-        self.player.set_playing(false);
+        self.stop();
         self.player.seek(t, true);
     }
 
@@ -1004,7 +1089,8 @@ impl App {
     }
 
     pub fn pause(&self) {
-        self.player.set_playing(false);
+        self.stop();
+        self.sync_lanes();
         self.show_playing();
     }
 
@@ -1018,10 +1104,12 @@ impl App {
             if st.s.target().is_none() {
                 return;
             }
-            if self.player.playing() && st.source_play {
+            let playing = self.player.playing() || st.starting != Starting::No;
+            if playing && st.source_play {
                 drop(st);
                 return self.pause();
             }
+            st.starting = Starting::No;
             st.source_play = true;
             let (lo, hi) = self.trim.span();
             let near = to_f64(&st.s.frame()) * 1.5;
@@ -1045,7 +1133,8 @@ impl App {
             if st.s.clips().is_empty() {
                 return;
             }
-            if self.player.playing() && !st.source_play {
+            let playing = self.player.playing() || st.starting != Starting::No;
+            if playing && !st.source_play {
                 drop(st);
                 return self.pause();
             }
@@ -1062,16 +1151,45 @@ impl App {
                 (None, None, Some(_), Some(_)) => None,
                 _ => return,
             };
-            at.and_then(|at| st.s.locate(&if at >= st.s.total() - near { time::zero() } else { at }))
+            // ...and where playing will begin: at the end, the beginning
+            let from = at.map(|at| if at >= st.s.total() - near { time::zero() } else { at });
+            (from.and_then(|from| st.s.locate(&from)), from.unwrap_or_else(|| line_of(&st)))
         };
-        match jump {
-            Some((i, source)) => self.select(i, Some(to_f64(&source)), true),
-            None => {
-                self.reattach();
-                self.player.set_playing(true);
+        let (jump, from) = jump;
+        if self.lanes_lead(&from) <= 0.02 {
+            // nothing in the lanes to wait for: the picture starts at once
+            match jump {
+                Some((i, source)) => self.select(i, Some(to_f64(&source)), true),
+                None => {
+                    self.reattach();
+                    self.player.set_playing(true);
+                }
+            }
+        } else {
+            // the sounds go first; see carry_on_starting
+            match jump {
+                Some((i, source)) => self.select(i, Some(to_f64(&source)), false),
+                None if self.player.playing() => {} // it was playing the bar by itself: carry straight on
+                None => self.reattach(),
+            }
+            if !self.player.playing() {
+                self.st.borrow_mut().starting = Starting::Finding;
+                self.carry_on_starting();
             }
         }
+        self.sync_lanes();
         self.show_playing();
+    }
+
+    /// How long before the picture the lanes' sounds must be let go, to be heard with it when
+    /// playing starts at `line` of the finished video. Zero when no lane has a sound there.
+    fn lanes_lead(&self, line: &R) -> f64 {
+        let st = self.st.borrow();
+        let players = self.lane_players.borrow();
+        (0..LANES)
+            .filter(|&n| self.hears(n) && st.s.sound_cue(n, line).is_some_and(|cue| cue.2))
+            .map(|n| players[n].start_lead())
+            .fold(0.0, f64::max)
     }
 
     // ------------------------------------------------------------ editing
@@ -1087,7 +1205,7 @@ impl App {
     fn on_scrub(&self, t: f64, last: bool) {
         self.stop_editing();
         self.st.borrow_mut().dragging = !last;
-        self.player.set_playing(false);
+        self.stop();
         self.seek(t, last); // keyframes while dragging, the exact frame on release
     }
 
@@ -1100,7 +1218,7 @@ impl App {
             st.dragging = !last;
             (i, to_f64(&source), st.s.sound().is_some() || st.s.selected != Some(i))
         };
-        self.player.set_playing(false);
+        self.stop();
         if change {
             self.select(i, Some(source), false);
         } else {
@@ -1144,7 +1262,7 @@ impl App {
         if let (Some(t), true) = (t, has) {
             if which == "pos" {
                 let duration = self.st.borrow().s.target_info().map_or(time::zero(), |i| i.duration);
-                self.player.set_playing(false);
+                self.stop();
                 self.seek(to_f64(&t.min(duration)), true);
             } else {
                 let hit = if which == "in" { TrimHit::In } else { TrimHit::Out };
@@ -1232,13 +1350,47 @@ impl App {
         self.refresh();
     }
 
+    /// The selected sound is dragged. The play line of the finished video stays where it is,
+    /// so the play position within the sound changes instead: the trim bar shows which part
+    /// of the sound is now under the line.
     fn on_sound_move(&self, at: f64, lane: Option<usize>, last: bool) {
         if last {
             self.st.borrow_mut().gesture = false;
+            self.load(false); // and the preview goes there once the sound is let go of
+            self.refresh();
             return;
         }
         self.begin_gesture();
-        self.st.borrow_mut().s.move_sound(floor_us(at), lane);
+        let line = self.montage_pos();
+        {
+            let mut st = self.st.borrow_mut();
+            st.s.move_sound(floor_us(at), lane);
+            let pos = st.pos;
+            keep_line(&mut st, line, pos);
+        }
+        self.refresh();
+    }
+
+    /// Left and Right with a sound selected: slide it along its lane by one picture of the
+    /// clip, or with Shift by a second. The play line stays where it is, as when dragging.
+    fn nudge_sound(&self, later: bool, second: bool) {
+        self.stop_editing();
+        self.stop();
+        let line = self.montage_pos();
+        {
+            let mut st = self.st.borrow_mut();
+            let picture = st.s.clip().and_then(|c| st.s.infos.get(&c.media)).and_then(|i| i.video.as_ref()).map_or(r(1, 30), |v| v.fps.recip());
+            let step = if second { time::int(1) } else { picture };
+            // one undo step per run of presses, not per press
+            if st.nudge_edit.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+                st.s.checkpoint();
+            }
+            st.nudge_edit = Some(Instant::now());
+            st.s.nudge_sound(if later { step } else { -step });
+            let pos = st.pos;
+            keep_line(&mut st, line, pos);
+        }
+        self.load(false);
         self.refresh();
     }
 
@@ -1310,11 +1462,12 @@ impl App {
             return false;
         }
         match name.as_str() {
-            "space" if self.player.playing() => self.pause(),
+            "space" if self.playing() => self.pause(),
             "space" if shift => self.play_source(),
             "space" => self.play_montage(),
+            "Left" | "Right" if sound_mode => self.nudge_sound(name == "Right", shift),
             "Left" | "Right" => {
-                self.player.set_playing(false);
+                self.stop();
                 self.reattach();
                 if shift {
                     let duration = self.st.borrow().s.target_info().map_or(0.0, |i| to_f64(&i.duration));
@@ -1589,7 +1742,7 @@ impl App {
             st.cancel = Some(cancel.clone());
             (plan, st.s.project.media.clone(), cancel)
         };
-        self.player.set_playing(false);
+        self.stop();
         self.export_btn.set_sensitive(false);
         self.progress.set_fraction(0.0);
         self.progress.set_visible(true);

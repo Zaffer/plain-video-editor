@@ -73,6 +73,7 @@ fn window_picture(a: &App, path: &str) -> Option<()> {
 
 const NONE: gdk::ModifierType = gdk::ModifierType::empty();
 const CTRL: gdk::ModifierType = gdk::ModifierType::CONTROL_MASK;
+const SHIFT: gdk::ModifierType = gdk::ModifierType::SHIFT_MASK;
 
 fn click_clip(a: &App, i: usize, dx: f64) {
     let g = a.timeline.geom();
@@ -144,7 +145,8 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
               (after.0 - dur * 0.8).abs() < 0.06 && (after.1, after.2, after.3) == (before.1, before.2, before.3), (&before, &after));
     a.trim.simulate_drag(x_free, low, x_free + 60.0);
     sleep(100).await;
-    rep.check("a press below the bar away from the knobs does nothing", a.st.borrow().pos == after.0 && a.st.borrow().s.undo_depth() == before.3, a.st.borrow().pos);
+    // (the player may still be settling on the exact picture, so the position is compared loosely)
+    rep.check("a press below the bar away from the knobs does nothing", (a.st.borrow().pos - after.0).abs() < 0.06 && a.st.borrow().s.undo_depth() == before.3, a.st.borrow().pos);
 
     // --- drag the in knob (below the bar): the play position must not move
     let pos_before = a.st.borrow().pos;
@@ -435,6 +437,27 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     sleep(300).await;
     rep.check("sound item trimmed by typing", a.st.borrow().s.sound().is_some_and(|s| (s.start, s.end) == (int(7), int(17))), "");
     rep.check("sound mode disables clip-only controls", !a.lock.is_sensitive() && a.crop.rect().is_none(), "");
+
+    // --- with a sound selected, Left and Right slide it along its lane
+    let at = |a: &App| a.st.borrow().s.sound().map(|s| s.at);
+    let (line, depth) = (a.timeline.pos(), a.st.borrow().s.undo_depth());
+    a.key(gdk::Key::Right, NONE);
+    a.key(gdk::Key::Right, NONE);
+    rep.check("Right slides the sound one picture later each time", at(a) == Some(r(2, 30)), at(a));
+    a.key(gdk::Key::Right, SHIFT);
+    a.key(gdk::Key::Left, NONE);
+    sleep(300).await;
+    rep.check("Shift a second, Left earlier", at(a) == Some(int(1) + r(1, 30)), at(a));
+    rep.check("the play line stays where it was", a.timeline.pos() == line, (line, a.timeline.pos()));
+    rep.check("and the clip is not what moved", a.st.borrow().s.clips()[0].start == int(5) && a.st.borrow().s.sel_audio == Some((1, 0)), "");
+    a.key(gdk::Key::Left, SHIFT);
+    a.key(gdk::Key::Left, SHIFT);
+    rep.check("it stops at the start of the montage", at(a) == Some(int(0)), at(a));
+    a.key(gdk::Key::Right, SHIFT);
+    rep.check("a run of presses is one step to undo", a.st.borrow().s.undo_depth() == depth + 1, a.st.borrow().s.undo_depth());
+    a.key(gdk::Key::z, CTRL);
+    sleep(300).await;
+    rep.check("undo puts it back", at(a) == Some(int(0)) && a.st.borrow().s.sel_audio == Some((1, 0)), at(a));
     a.key(gdk::Key::Escape, NONE);
     sleep(400).await;
     rep.check("Escape returns to the clip", a.st.borrow().s.sound().is_none() && a.st.borrow().s.selected == Some(0), "");
@@ -515,9 +538,14 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
 
     // --- playback: carries on into clip 2, with the lane playing in step
     a.seek(14.5, true);
-    sleep(500).await;
+    sleep(700).await;
+    // while paused, the lane's sound waits where it will be wanted, so that playing does not
+    // begin with a moment of whatever it played last
+    let waiting = { let players = a.lane_players.borrow(); (players[1].is_paused(), players[1].position()) };
+    rep.check("while paused, the lane's sound waits at the play line", waiting.0 && waiting.1.is_some_and(|p| (p - 16.5).abs() < 0.05), waiting);
     a.play_montage();
     sleep(400).await;
+    let jumps_before = a.lane_players.borrow()[1].jumps;
     let (lane_path, lane_now, want) = {
         let players = a.lane_players.borrow();
         (players[1].path.clone(), players[1].position(), 7.0 + (a.st.borrow().pos - 5.0))
@@ -532,6 +560,9 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     sleep(800).await;
     let state = (a.st.borrow().s.selected, a.st.borrow().pos);
     rep.check("playback carried on into clip 2", state.0 == Some(1) && state.1 >= 7.0, state);
+    // a lane that keeps jumping to get back in step stutters; it is to be steered, not thrown about
+    let jumps = a.lane_players.borrow()[1].jumps - jumps_before;
+    rep.check("the lane played to the end of its sound without jumping about", jumps == 0, jumps);
     a.pause();
     sleep(300).await;
     rep.check("lane pauses with the clip", a.lane_players.borrow()[1].is_paused(), "");
@@ -549,9 +580,19 @@ async fn run(a: &Rc<App>, out: &str, files: &[String], rep: &mut Report) {
     let state = (a.st.borrow().s.selected, a.st.borrow().pos, a.timeline.pos());
     rep.check("the finished video stops at its end", !a.player.playing() && state.0 == Some(1) && (state.1 - 17.0).abs() < 0.2 && (state.2 - 20.0).abs() < 0.2, state);
     a.play_montage();
-    sleep(600).await;
+    // a lane has sound at the beginning: it is let go first, and the picture follows when it is heard
+    let asked = (a.playing(), a.player.playing());
+    let t1 = Instant::now();
+    while !a.player.playing() && t1.elapsed() < Duration::from_secs(3) {
+        sleep(20).await;
+    }
+    let waited = t1.elapsed().as_secs_f64();
+    sleep(500).await;
     let state = (a.st.borrow().s.selected, a.st.borrow().pos);
     rep.check("play at the end starts it again from the beginning", a.player.playing() && state.0 == Some(0) && (5.0..6.5).contains(&state.1), state);
+    rep.check("the picture waits a moment for the lane's sound, and no longer", asked == (true, false) && (0.1..1.5).contains(&waited), (asked, waited));
+    let (lane_now, want) = (a.lane_players.borrow()[1].position(), 7.0 + (a.st.borrow().pos - 5.0));
+    rep.check("and the two are in step from the start", lane_now.is_some_and(|n| (n - want).abs() < 0.15), (lane_now, want));
     a.key(gdk::Key::space, NONE);
     sleep(200).await;
     rep.check("Space pauses", !a.player.playing(), "");

@@ -89,7 +89,9 @@ There are four rows, each with a button at its start and one at its end:
   the play position on the trim bar, or play that bar.
 - **Sound.** Every sound is an item in one of the two lanes. Click an item to
   select it; then the trim bar, the times and the volume act on it, Delete
-  removes it, and dragging moves it (between lanes too). Items that overlap
+  removes it, and dragging moves it (between lanes too). Left and Right slide
+  it along its lane a frame at a time, or a second with Shift. The play line
+  stays where it is while a sound is moved, so a beat can be brought to it. Items that overlap
   are mixed in the export, whether they share a lane or not.
 - **A clip's own sound** sits in lane 1, drawn joined to its clip. While it is
   linked it follows the clip through trims, splits and reordering, and the
@@ -109,7 +111,7 @@ There are four rows, each with a button at its start and one at its end:
 |---|---|
 | Space | play the finished video / pause |
 | Shift+Space | play what the trim bar shows, by itself / pause |
-| Left / Right | one frame back / forward (Shift: one second) |
+| Left / Right | one frame back / forward (Shift: one second). With a sound selected: slide the sound that much earlier / later along its lane |
 | I / O | set the in / out point at the play position |
 | S | split the clip at the play position |
 | Delete | remove the selected clip or sound item |
@@ -225,7 +227,11 @@ screen, a picture of all of it in `/tmp/out-window.png`.
   tracks from the camera (metadata, timecode, thumbnails) are dropped.
 - Frame-accurate lossless cutting ("smart cut") is not implemented.
 - Lane sound in the preview is played by a second player and can be a few
-  hundredths of a second out; the export is exact.
+  hundredths of a second out; the export is exact. A sound takes about a fifth
+  of a second to be heard once it is started, so when a lane has something to
+  play, the picture starts that much after Play is pressed, and both begin
+  together. To get back in step after a cut to another file (where the picture
+  takes a moment to appear), the sound plays up to 4% slower for a few seconds.
 - The preview plays one item per lane at a time. Where two items overlap in
   the same lane, only one of them is heard in the preview; the export mixes
   both.
