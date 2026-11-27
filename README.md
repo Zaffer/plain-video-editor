@@ -35,13 +35,15 @@ the play line; a sound file dropped on the window goes into whichever lane is
 free there.
 
 To have it in the applications menu with its logo, and under **Open With**
-for video files, install it for your user (nothing here needs root):
+for video files, install it for your user (no root needed):
 
 ```
-install -Dm755 -t ~/.local/bin target/release/pve-gui target/release/pve
-install -Dm644 -t ~/.local/share/applications data/io.github.zaffer.PlainVideoEditor.desktop
-install -Dm644 -t ~/.local/share/icons/hicolor/scalable/apps data/io.github.zaffer.PlainVideoEditor.svg
+./install.sh               # build and install; run again to update
+./install.sh --uninstall   # remove it
 ```
+
+It puts `pve-gui` and `pve` in `~/.local/bin`, and the desktop entry and logo
+under `~/.local/share`.
 
 No video is kept in this repository: media files are git-ignored everywhere.
 Put clips of your own in `examples/` to follow the commands here.
@@ -175,6 +177,7 @@ examples/             a project to try; your own clips go here
 data/                 the logo and the desktop entry, installed with the programs
 docs/                 the picture in this file
 dev-env.sh            builds the window without the -dev packages installed
+install.sh            installs it in the applications menu for your user
 ```
 
 | Part | Where |
